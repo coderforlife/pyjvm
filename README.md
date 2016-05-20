@@ -44,13 +44,11 @@ Additionally, you can check if the JVM is already started with:
 
     jvm.started()
 	
-The JVM can be stopped with the following, however not that be careful that all Java instances are
-not used after the JVM is stopped.
-
-	jvm.stop()
-
 **Note:** currently the classpath must be specified before the JVM is started. It is planned to
 make it dynamic in the future.
+
+**Note:** technically the JVM can be stopped with `jvm.stop()`, however it is unlikely to be able
+to be restarted after that due to limitations of most JVMs, so it is of limited use.
 
 
 Java Modules
@@ -151,13 +149,13 @@ using an ellipsis in the brackets:
     sigs = java.util.Data[...]
     sigs = java.lang.System.out.println[...]
 
-When used without the ellipsis, the brackes actually give back a `JavaMethod` or `JavaConstructor`
+When used without the ellipsis, the brackes actually give back a `J.JavaMethod` or `J.JavaConstructor`
 object that can be passed around, and when called, calls the method for the original instance of
 creates an object. The object can also be queried for its name, signature, paramater types, the
 return type/`JavaClass` that will be created, and the object is it bound to (if it isn't a
 constructor or static method).
 
-When a method is not called or the brackets are not used on it, it is a `JavaMethods` object which
+When a method is not called or the brackets are not used on it, it is a `J.JavaMethods` object which
 can also be passed around and is bound to the original object (if it wasnt a static method). It also
 can be queried for the bound object and class and name. Additionally, it can be iterated over,
 yielding `JavaMethod` objects. Similarily, a `JavaClass` object can be iterated over yeilding the
