@@ -22,8 +22,9 @@ Additionally, the java and javax namespaces are also directly importable:
 For the most part, the objects should behave as you might expect.
 
 **Note:** strings should always be unicode, and in some cases a byte-string will end up being
-converted to a byte array instead of a java.lang.String. In Python 3 this is easy, strings are
-normally unicode. In Python 2, it is recommended to use `from __future__ import unicode_literals`.
+converted to a byte array instead of a `java.lang.String`. In Python 3 this is easy, `str` is
+unicode. In Python 2, it is recommended to use `from __future__ import unicode_literals` which
+will help.
 
 
 Starting the JVM
@@ -44,11 +45,15 @@ Additionally, you can check if the JVM is already started with:
 
     jvm.started()
 	
-**Note:** currently the classpath must be specified before the JVM is started. It is planned to
-make it dynamic in the future.
-
 **Note:** technically the JVM can be stopped with `jvm.stop()`, however it is unlikely to be able
 to be restarted after that due to limitations of most JVMs, so it is of limited use.
+
+Besides using the `classpath` keyword argument of `jvm.start()`, the Java class-path can be
+adjusted with `jvm.add_class_path(path)`. If the JVM is not yet started, the path is added to the
+startup options whenever the JVM is started (through either `jvm.start()` or automatically via an
+import of one of the special modules). On the other hand, if the JVM is already started, the
+system class loader is modified, if possible, to include the class path. The system class loader
+must be a URLClassLoader, which the HotSpot JVM uses by default.
 
 
 Java Modules
@@ -140,8 +145,8 @@ These examples are simple, but hopefully you get the idea. You can specify a sin
 gives the parameter type signature or the full method signature (as given by the `javap` program,
 with . or / as separators). Or one value can be given for each parameter which is either a string
 representing the type (can be with or without the L;), or a `JavaClass` object, or a limited set of
-obvious Python types (`object` to `java.lang.Object`, `unicode` to `java.lang.String`, `bytes` to 
-`[B`, `bool` to `Z`, `int` to `I`, `long` to `J`, `float` to `D`).
+obvious Python types (`object` to `java.lang.Object`, unicode `str` to `java.lang.String`, `bytes` to 
+`[B`, `bool` to `Z`, `int` to `I`, `float` to `D`).
 
 Besides using the `javap` program to find the signatures, the available signatures can be found
 using an ellipsis in the brackets:
@@ -309,7 +314,7 @@ They also support several methods to convert to Python objects:
 
  * `arr.tounicode([start], [stop])`    (char arrays only)
 
-   Copies data to new `unicode` string.
+   Copies data to new unicode string.
 
  * `arr.copyto(dst, [start], [stop], [dst_off])`
   
@@ -382,7 +387,7 @@ and the reference, or object, array type in the `J` module.
     * Java array of same primitive type - creates a copy of the array
     * `array.array` of an appropiate typecode of 'B' - creates an array with a copy of data
     * `bytes`/`bytearray` - creates an array with a copy of data
-    * `unicode` - creates an array with a copy of data (only with `char_array`)
+    * unicode string - creates an array with a copy of data (only with `char_array`)
     * buffer-object or `memoryview` of same data type or bytes - creates an array with a copy of data
     * sequence - creates an array containing each element converted
 
