@@ -178,11 +178,8 @@ Access Modifiers
 You may notice that when performing `dir` on `JavaClass` or `Object` instances that some of the
 names have leading `_` and `__` even though they did not in the original Java code. This is because
 the access protection is being emulated with Python conventions and makes `protected` fields,
-methods, and nested classes begin with a `_` and `private` and package-private ones begin with a
-`__`. They are still accessible, since they can be accessed via reflection, but the underscores
-discourage direct access.
-
-**Note:** currently the underscores are not addded to classes at the package level
+methods, and classes begin with a `_` and `private` and package-private ones begin with a `__`.
+They are still accessible, since they can be accessed but the underscores discourage direct access.
 
 
 Predefined Class Templates
@@ -218,7 +215,7 @@ The other predefined class templates are:
 
 **Note:** currently `java.util.Set`, `java.util.List`, and `java.util.Map` do not implement
 `collections.MutableSet`, `collections.MutableSequence`, or `collections.MutableMap` as you would
-except, but this should be coming soon
+except
 
 
 Defining Class Templates
@@ -365,6 +362,16 @@ deep or shallow usage or specify a different type:
    Copies the array, converting the component type of the array to `newType`. If `newType` is not
    given, it is equivilent to `arr[from_:to]`.
 
+Additionally, primitive arrays support the buffer protocol so Numpy `arrays` and `memoryview`s can
+directly read the data. Note however there are some limitations to this due ot how the JVM handles
+arrays:
+
+ * The old buffer protocol is supported in Python v2.7 through the `__buffer__` attribute, which
+   allows Numpy to use it directly and also with `buffer(arr.__buffer__)`
+ * The new buffer protocol is always supported naturally, which Numpy and `buffer` use in Python
+   v3 and always by `memoryview`
+ * Both of them support writable buffers, however the writes likely won't show up in the Java
+   array until the buffer is released
 
 While all of these features help you if you can an array back from a Java method, but what if you
 need to create an array yourself? Well, there is a separate method for each of the primitive types
@@ -428,3 +435,34 @@ A few other methods and utilities are available in `J` module:
  * `J.get_java_class(classname)` - Gets the `JavaClass` for a given fully-qualified Java class name
  * `with J.synchronized(obj): ...` - Equivilent of the Java `synchronized` block on the object
  * `J.unbox(obj)` - unboxes a Java primitive wrapper, or returns the object as-is if it isn't a wrapper
+
+
+Planned Future Enhancements
+---------------------------
+ * Inner classes automatically know the outer class instance and incorporate it into the constructor
+ * Implement class templates for `java.util.Set`, `java.util.List`, and `java.util.Map` to
+   `collections.MutableSet`,  `collections.MutableSequence`, or `collections.MutableMap`
+ * `java.nio.ByteBuffer` and other `java.nio.Buffer` class templates
+ * More conversion types: `bytes`/`bytearray`/`unicode`,`array.array`/buffer-object -> `java.nio.ByteBuffer`
+   and other `java.nio.Buffer`, `int`/`long` -> `java.math.BigInteger` (using `_PyLong_AsByteArray`), `list`,
+   `tuple`, `complex`?, `dict`, `set`, `frozenset`, `decimal.Decimal`
+ * Support buffer protocol for multi-dimensional primitive arrays
+ * Support critical buffer access for primitive arrays and either periodically commiting writable
+   buffers or adding a method to commit them
+ * Support GUI functions on Mac (supposedly needs some extra work)
+ * Re-route `System.out`, `System.err`, and `System.in` to Python `sys.stdout`, `sys.stderr`, and `sys.stdin`
+ * Make `super(...)` work as excepted for Java classes using `CallNonvirtual<Type>Method` and `Get/Set<Type>Field`
+  [see https://docs.oracle.com/javase/specs/jls/se8/html/jls-15.html]
+ * Method resolution identical to Java
+ * Deal with weak references
+ * Subclassing Java classes
+ * Make Java annotations work like Python decorators
+ * `java.lang.Serializable` inheritance and pickle
+ * Generic types
+
+Thoughts:
+ * Should all JObjects be dealloced before JVM deallocs?
+ * Make `JEnv` raised exceptions have a few less traceback frames?
+ * Hook JVM exit and abort functions?
+ * Automatic property generation from get/set functions?
+ * Use `PyBuffer_SizeFromFormat` instead of `struct.calcsize`?
