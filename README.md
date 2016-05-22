@@ -210,8 +210,30 @@ The other predefined class templates are:
      in the `numbers` ABC appropiately
  * `java.lang.Throwable` extends from StandardError, making all Java exceptions raisable in Python;
    additionally `__str__` is defined as `getLocalizedMessage`
-   * Other exceptions extend from different Python exceptions as appropiate
-     [TODO: list all mapped exceptions]
+   * Other exceptions extend from different Python exceptions as appropiate:
+     * `java.lang.OutOfMemoryError` extends from `MemoryError`
+     * `java.lang.StackOverflowError` extends from `OverflowError`
+     * `java.lang.ArithmeticException` extends from `ArithmeticError`
+     * `java.lang.AssertionError` extends from `AssertionError`
+     * `java.lang.InterruptedException` extends from `KeyboardInterrupt`
+     * `java.lang.LinkageError` extends from `ImportError`
+     * `java.lang.VirtualMachineError` extends from `SystemError`
+     * Extend from `NameError`:
+       * `java.lang.ClassNotFoundException`, `java.lang.TypeNotPresentException`
+     * Extend from `AttributeError`:
+       * `java.lang.IllegalAccessException`, `java.lang.NoSuchFieldError`, `java.lang.NoSuchMethodError`
+     * Extend from `TypeError`:
+       * `java.lang.ClassCastException`, `java.lang.ArrayStoreException`, `java.lang.InstantiationException`, `java.lang.IllegalStateException`, `java.lang.UnsupportedOperationException`, `java.lang.reflect.UndeclaredThrowableException`
+     * Extend from `ValueError`:
+       * `java.lang.IllegalArgumentException`, `java.lang.NullPointerException`, `java.lang.EnumConstantNotPresentException`
+     * Extend from `IndexError`:
+       * `java.lang.IndexOutOfBoundsException`, `java.lang.NegativeArraySizeException`, `java.util.EmptyStackException`, `java.nio.BufferOverflowException'`, `java.nio.BufferUnderflowException`
+     * `java.util.NoSuchElementException` extends from `StopIteration`
+     * Extend from `IOError`:
+       * `java.io.IOException`, `java.io.IOError`
+     * `java.io.EOFException` extends from `EOFError`
+     * Extend from `UnicodeError`:
+       * `java.nio.charset.CharacterCodingException`, `java.nio.charset.CoderMalfunctionError`, `java.io.UTFDataFormatException`, `java.io.UnsupportedEncodingException`, `java.io.CharConversionException`
 
 **Note:** currently `java.util.Set`, `java.util.List`, and `java.util.Map` do not implement
 `collections.MutableSet`, `collections.MutableSequence`, or `collections.MutableMap` as you would
@@ -249,15 +271,104 @@ influence on the Java code itself
 
 Automatic Conversion
 --------------------
-TODO
+PyJVM automatically converts arguments when calling Java methods are when setting a Java field
+value. If the method argument or field value is a primitive, the conversions follow these
+conversions:
+
+ * If the target is `boolean`, uses the result of converting the object to a `bool`, however
+   methods will only accept `bool`, `java.lang.Boolean`, and objects that define `__nonzero__` or
+   `__bool__` as `boolean` arguments
+ * If the target is `byte`, then it will convert a length-1 `bytes` or `bytearray` or the result
+   of converting the object to an `int` (excluding strings) if the value is within -128 to 127
+ * If the target is `char`, then it will convert a length-1 unicode string or the result of
+   converting the object to an `int` (excluding strings) if the value is within 0 to 65535
+   (the unicode string is preferred)
+ * If the target is a `short`, `int`, or `long`, uses the result of converting the object to an
+   `int` (excluding strings) if the value is within the primitive type's range
+ * If the target is a `float` or `double`, uses the result of converting the object to a `float`
+   (the target being a double is preferred)
+
+Since the class templates for the primitive wrappers (e.g. `java.lang.Byte`) define the necessary
+numerical conversion methods, they will automatically be unboxed if necessary.
+
+Non-primitive conversion is a bit more complicated. The best way to ensure that the object is
+converted correctly is to make sure that it is a Python-wrapped Java object already. Otherwise,
+a list of converters is checked in order, and each one of them rates the quality of conversion
+they can perform from the Python object to the target Java class. The converter that reports that
+it can give the best quality conversion is used to convert the object.
+
+The built-in object conversions are (in the order they are checked):
+
+ * `None` to `null`
+ * A Java-wrapped object, as long as it can be cast to the target
+ * `JavaClass` to `java.lang.Class`
+ * unicode string to `java.lang.String`
+ * unicode string with a length of 1 to `java.lang.Character`
+ * unicode string to `char[]`
+ * auto-boxing:
+   * `bool` or any Python object that has `__nonzero__` or `__bool__` to `java.lang.Boolean`
+   * Integral types (`int`, `long`, or has `__int__` or `__long__`) to `java.lang.Byte`,
+     `java.lang.Character`, `java.lang.Short`, `java.lang.Integer`, or `java.lang.Long` as long
+     as the value fits in the range of the target type; converting to `Character` is less
+     preferable here
+   * Floating-point types (`float` or has `__float__`) to `java.lang.Float` or `java.lang.Double`
+     (prefers doubles)
+ * `bytes` with a length of 1 to `java.lang.Byte`
+ * `bytes` to `[B`
+ * `bytes` to `java.lang.String` (strongly prefer other conversions though)
+ * `bytearray` with a length of 1 to `java.lang.Byte`
+ * `bytearray` to `[B`
+ * `array.array` to a primitive array of the same type as given by the `array`'s `typecode` and `itemsize`
+ * buffer-object or `memoryview` to a primitive array of the same type as given by the buffer's `format` and `itemsize`
+
+After the built-in converters are checked, custom converters are checked as well. A custom
+converter is added with the function `J.register_converter`. This function takes a Python
+`type`, a `JavaClass`, and a `callable`. The given `callable` takes the Python object to be
+converted and the `JavaClass` we would like to convert to. The Python object to be converted
+is guaranteed to be an instance of the Python `type` given to `register_converter` (which
+can be `None` to not pre-filter based on the Python object's type) and the `JavaClass` is a
+the same as or a subclass of the `JavaClass` given to `register_converter` (which also can
+be `None` to not pre-filter based on the target Java class). Given this information, the
+`callable` must return a quality and another `callable` for converting the Python object to
+the target Java class. The quality is a number from -1 to 100 which is the predicted quality
+of the conversion that would take place. A value of -1 means the conversion cannot be done
+at all and a value of 100 means a perfect conversion (which should be used sparingly). The
+converter `callable` takes a single argument of a Python object and returns a Python-wrapped
+Java object of the appropiate class.
+
+When calling a group of Java methods (because there are several overloaded methods have the
+same name in a class), the arguments are checked against each method and the overall best
+quality matching conversion is used. If two methods tie for the best, an error is raised
+stating that it is an ambiguous method call (which can be resolved using the `[]` on the
+group of methods). The return type of methods is never taken into account. If a single
+value matches the component type of a var-args argument, it is slightly less preferred
+to matching the single value to just its component type.
+
+So far this has all been about Python to Java conversions. The opposite direction is also
+handled, but in a much simpler way and is not extensible. The following conversions are
+done:
+
+ * `boolean` to `bool`
+ * `char` to length-1 unicode string
+ * `byte`/`short`/`int`/`long` to `int` or `long` based on value
+ * `float`/`double` to `float`
+ * `null` to `None` (`void` methods return `None` as well)
+ * `java.lang.String` to unicode string
+
+All other Java objects are simply wrapped in a Python wrapper, which due to class
+templates, can be very Python-like objects.
+
+**Note:** since `java.lang.String` objects are always converted to unicode strings, it is
+impossible to ever have a Python-wrapped instance of a Java string.
 
 
 Java Arrays
 -----------
-Java arrays fall into two different categories: primitive and reference. They support the basic Java
-length property available in Java:
+Java arrays fall into two different categories: primitive and reference. They support the basic
+`length` property and `clone` method available in Java:
 
  * `arr.length` - the length of the array
+ * `x = arr.clone()` - create a shallow copy of the array
 
 When wrapped in Python they both support the following basic Python sequence methods:
 
@@ -440,6 +551,7 @@ A few other methods and utilities are available in `J` module:
 Planned Future Enhancements
 ---------------------------
  * Inner classes automatically know the outer class instance and incorporate it into the constructor
+ * Proper modified UTF-8 conversion (currently using actual UTF-8 while Java uses a modified form)
  * Implement class templates for `java.util.Set`, `java.util.List`, and `java.util.Map` to
    `collections.MutableSet`,  `collections.MutableSequence`, or `collections.MutableMap`
  * `java.nio.ByteBuffer` and other `java.nio.Buffer` class templates
