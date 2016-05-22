@@ -208,7 +208,7 @@ The other predefined class templates are:
    as `longValue`
    * all of those plus `java.lang.Number`, `java.lang.Float` and `java.lang.Double` are registered
      in the `numbers` ABC appropiately
- * `java.lang.Throwable` extends from StandardError, making all Java exceptions raisable in Python;
+ * `java.lang.Throwable` extends from `Exception`, making all Java exceptions raisable in Python;
    additionally `__str__` is defined as `getLocalizedMessage`
    * Other exceptions extend from different Python exceptions as appropiate:
      * `java.lang.OutOfMemoryError` extends from `MemoryError`
@@ -237,7 +237,7 @@ The other predefined class templates are:
 
 **Note:** currently `java.util.Set`, `java.util.List`, and `java.util.Map` do not implement
 `collections.MutableSet`, `collections.MutableSequence`, or `collections.MutableMap` as you would
-except
+expect.
 
 
 Defining Class Templates
