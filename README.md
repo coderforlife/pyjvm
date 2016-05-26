@@ -46,7 +46,7 @@ Additionally, you can check if the JVM is already started with:
     jvm.started()
 	
 **Note:** technically the JVM can be stopped with `jvm.stop()`, however it is unlikely to be able
-to be restarted after that due to limitations of most JVMs, so it is of limited use.
+to be restarted after that due to limitations of most JVMs, so it is of limited use
 
 Besides using the `classpath` keyword argument of `jvm.start()`, the Java class-path can be
 adjusted with `jvm.add_class_path(path)`. If the JVM is not yet started, the path is added to the
@@ -120,7 +120,7 @@ more Python mappings. See [Predefined Class Templates](#predefined-class-templat
 information.
 
 **Note:** unlike in Java, static methods and fields are inaccessible from instances, in Java this only
-produces a warning (and is strongly discouraged), here it is enforced.
+produces a warning (and is strongly discouraged), here it is enforced
 
 
 Java Methods and Constructors
@@ -167,10 +167,17 @@ yielding `JavaMethod` objects. Similarily, a `JavaClass` object can be iterated 
 `JavaConstructor` objects.
 
 **Note:** the brackets on `JavaClass` objects also are important for arrays, see the end of the
-[Java Arrays](#java-arrays) section.
+[Java Arrays](#java-arrays) section
 
 **Note:** when using the brackets, var-args must be given as an array type, but when called the
-array will be created automatically if necessary.
+array will be created automatically if necessary
+
+Methods and constructors can also take a keyword argument `withgil` that if set to `False` will
+cause the GIL to be released for the duration of the call. There is some slight overhead in
+releasing the GIL, but it is highly recommended to do so for any lengthy or I/O operations so that
+other Python threads may work. Example:
+
+    myObject.long_operatation(5, withgil=False) # calls without GIL while passing 5 to the method
 
 
 Access Modifiers
@@ -201,13 +208,27 @@ The other predefined class templates are:
    `hasMoreElements` and `nextElement`
  * `java.util.Collection` implements `collections.Sized` and `collections.Container` by defining
    `__len__` as `size` and `__contains__` as `contains`
- * `java.lang.Boolean` defines `__nonzero__` as booleanValue
- * `java.lang.Number` defines `__nonzero__`, `__int__`, `__long__` as `longValue` and `__float__` as
-   `doubleValue`
+ * `java.util.List` implements the entirety of `collections.MutableSequence` including support for
+   slice operations as long as the step size is exactly 1; also has `sort` and `binarySearch`
+   methods from `java.util.Collections`
+ * `java.util.Set` implements the entirety of `collections.MutableSet` with the operations that
+   create new sets requiring that there is a Java constructor that takes a `java.util.Collection`;
+   currently this class only accepts other `java.util.Set` objects using the operations
+ * `java.util.Map` implements the entirety of `collections.MutableMap`
+ * `java.util.Map.Entry` implements `collections.Sequence`, pretending to be a 2-element `tuple` of
+   key and value so that `java.util.Map.popitem()` and `java.util.Map.items()` work like expected
+   in Python
+ * `java.lang.Boolean` defines `__nonzero__`/`__bool__` as booleanValue
+ * `java.lang.Number` defines `__nonzero__`/`__bool__`, `__int__`, `__long__` as `longValue` and
+   `__float__` as `doubleValue`
  * `java.lang.Byte`, `java.lang.Short`, `java.lang.Integer`, and `java.lang.Long` define `__index__`
    as `longValue`
    * all of those plus `java.lang.Number`, `java.lang.Float` and `java.lang.Double` are registered
      in the `numbers` ABC appropiately
+ * `java.math.BigInteger` implements the entirety of `numbers.Integral` and supports interoperability
+   with Python `numbers.Integral` values
+ * `java.math.BigDecimal` implements the entirety of `numbers.Rational` and supports interoperability
+   with `java.math.BigInteger`, `decimal.Decimal`, and Python `numbers.Real` values
  * `java.lang.Throwable` extends from `Exception`, making all Java exceptions raisable in Python;
    additionally `__str__` is defined as `getLocalizedMessage`
    * Other exceptions extend from different Python exceptions as appropiate:
@@ -235,10 +256,6 @@ The other predefined class templates are:
      * Extend from `UnicodeError`:
        * `java.nio.charset.CharacterCodingException`, `java.nio.charset.CoderMalfunctionError`, `java.io.UTFDataFormatException`, `java.io.UnsupportedEncodingException`, `java.io.CharConversionException`
 
-**Note:** currently `java.util.Set`, `java.util.List`, and `java.util.Map` do not implement
-`collections.MutableSet`, `collections.MutableSequence`, or `collections.MutableMap` as you would
-expect.
-
 
 Defining Class Templates
 ------------------------
@@ -247,7 +264,7 @@ must be defined before the Java class is ever used. To create a class template, 
 class that either has some other Java interface or class as a base or has the metaclass `JavaClass`.
 In either case, the class definition also requires a field `__java_class_name__` that is a unicode
 string with the full name of the class or interface. For example, the class template for
-`java.lang.Iterable` coudl be made as follows:
+`java.lang.Iterable` could be made as follows:
 
     class Iterable(object):
         __metaclass__ = JavaClass
@@ -302,20 +319,23 @@ The built-in object conversions are (in the order they are checked):
  * `None` to `null`
  * A Java-wrapped object, as long as it can be cast to the target
  * `JavaClass` to `java.lang.Class`
+ * unicode string to an instance of `java.lang.Enum`
  * unicode string to `java.lang.String`
  * unicode string with a length of 1 to `java.lang.Character`
  * unicode string to `char[]`
  * auto-boxing:
    * `bool` or any Python object that has `__nonzero__` or `__bool__` to `java.lang.Boolean`
-   * Integral types (`int`, `long`, or has `__int__` or `__long__`) to `java.lang.Byte`,
-     `java.lang.Character`, `java.lang.Short`, `java.lang.Integer`, or `java.lang.Long` as long
-     as the value fits in the range of the target type; converting to `Character` is less
-     preferable here
-   * Floating-point types (`float` or has `__float__`) to `java.lang.Float` or `java.lang.Double`
-     (prefers doubles)
+   * `numbers.Integral` types (e.g. `int`/`long`) to `java.lang.Byte`, `java.lang.Character`,
+     `java.lang.Short`, `java.lang.Integer`, or `java.lang.Long` as long as the value fits in the
+     range of the target type; converting to `Character` is less preferable here
+   * `numbers.Real` types  (e.g. `float`) to `java.lang.Float` or `java.lang.Double` (prefers doubles)
+ * `numbers.Integral` to `java.math.BigInteger`
+ * `decimal.Decimal` and `numbers.Real` to `java.math.BigDecimal`
+ * `decimal.Context` to `java.math.MathContext`
+ * `datetime.date` and `datetime.datetime` to `java.util.Date`
  * `bytes` with a length of 1 to `java.lang.Byte`
  * `bytes` to `[B`
- * `bytes` to `java.lang.String` (strongly prefer other conversions though)
+ * `bytes` to `java.lang.String` (only in Python 3, strongly prefer other conversions though)
  * `bytearray` with a length of 1 to `java.lang.Byte`
  * `bytearray` to `[B`
  * `array.array` to a primitive array of the same type as given by the `array`'s `typecode` and `itemsize`
@@ -359,7 +379,7 @@ All other Java objects are simply wrapped in a Python wrapper, which due to clas
 templates, can be very Python-like objects.
 
 **Note:** since `java.lang.String` objects are always converted to unicode strings, it is
-impossible to ever have a Python-wrapped instance of a Java string.
+impossible to ever have a Python-wrapped instance of a Java string
 
 
 Java Arrays
@@ -536,7 +556,9 @@ The class of the array can be obtained with and empty slice:
     cls = java.lang.Object[:]  # equivilent of the Java code Class<Object[]> cls = Object[].class
 
 **Note:** when using `dir` on Java arrays, only the methods defined in `java.lang.Object` show up,
-all of the methods and fields listed above must be used directly without introspection.
+all of the methods and fields listed above must be used directly without introspection
+
+**Note:** most array methods will automatically release the GIL if the array is large enough
 
 
 Other Methods
@@ -551,30 +573,25 @@ A few other methods and utilities are available in `J` module:
 Planned Future Enhancements
 ---------------------------
  * Inner classes automatically know the outer class instance and incorporate it into the constructor
- * Proper modified UTF-8 conversion (currently using actual UTF-8 while Java uses a modified form)
- * Implement class templates for `java.util.Set`, `java.util.List`, and `java.util.Map` to
-   `collections.MutableSet`,  `collections.MutableSequence`, or `collections.MutableMap`
- * `java.nio.ByteBuffer` and other `java.nio.Buffer` class templates
- * More conversion types: `bytes`/`bytearray`/`unicode`,`array.array`/buffer-object -> `java.nio.ByteBuffer`
-   and other `java.nio.Buffer`, `int`/`long` -> `java.math.BigInteger` (using `_PyLong_AsByteArray`), `list`,
-   `tuple`, `complex`?, `dict`, `set`, `frozenset`, `decimal.Decimal`
+ * `java.nio.ByteBuffer` and other `java.nio.Buffer` class templates and conversions for `bytes`,
+   `bytearray`, `unicode`, `array.array`, buffer-object to them
  * Support buffer protocol for multi-dimensional primitive arrays
  * Support critical buffer access for primitive arrays and either periodically commiting writable
    buffers or adding a method to commit them
  * Support GUI functions on Mac (supposedly needs some extra work)
  * Re-route `System.out`, `System.err`, and `System.in` to Python `sys.stdout`, `sys.stderr`, and `sys.stdin`
  * Make `super(...)` work as excepted for Java classes using `CallNonvirtual<Type>Method` and `Get/Set<Type>Field`
-  [see https://docs.oracle.com/javase/specs/jls/se8/html/jls-15.html]
+   [see https://docs.oracle.com/javase/specs/jls/se8/html/jls-15.html]
  * Method resolution identical to Java
  * Deal with weak references
- * Subclassing Java classes
+ * Subclassing Java classes, in particular making wrappers for Python `tuple`/`list`, `set`/`frozenset`, and
+   `dict` objects to act as `java.util.List`, `java.util.Set`, and `java.util.Map` objects
  * Make Java annotations work like Python decorators
- * `java.lang.Serializable` inheritance and pickle
+ * Pickling of `java.lang.Serializable` objects 
  * Generic types
 
 Thoughts:
  * Should all JObjects be dealloced before JVM deallocs?
- * Make `JEnv` raised exceptions have a few less traceback frames?
  * Hook JVM exit and abort functions?
  * Automatic property generation from get/set functions?
  * Use `PyBuffer_SizeFromFormat` instead of `struct.calcsize`?
