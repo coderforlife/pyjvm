@@ -107,10 +107,12 @@ Java Instances
 --------------
 Once you get an instance of a Java object, you can start using the resulting object just like you
 would in Java, accessing fields and calling methods. Just like with `JavaClass` objects, you can
-use `dir` on the instances to get a list of the instance fields, methods, and member classes.
+use `dir` on the instances to get a list of the instance fields, methods, and inner classes.
 
-**Note:** currently member classes do not remember where they came from, and so their constructor
-needs to be passed an additional first argument for the instance they are linked to.
+Inner classes (non-static member classes) remember which object you accessed them from and calling
+their constructors will automatically add the appropiate object as the first argument just like in
+Java. However, it is possible to get un-bound inner classes (via `J.get_java_class`) in which case
+the first argument to the constructor must be an instance of the declaring class.
 
 The `JavaClass` of an object can be obtained using `type` on the instance. Additionally, the Java
 instances try to emulate Python classes as best they can. Calling `hash(j)` on a Java instance will
@@ -120,7 +122,8 @@ more Python mappings. See [Predefined Class Templates](#predefined-class-templat
 information.
 
 **Note:** unlike in Java, static methods and fields are inaccessible from instances, in Java this only
-produces a warning (and is strongly discouraged), here it is enforced
+produces a warning (and is strongly discouraged), here it is enforced; additionally, static members
+are only available on the class that declared them and are not inherited
 
 
 Java Methods and Constructors
@@ -448,9 +451,18 @@ They also support several methods to convert to Python objects:
   
     Copies the data from `arr[start:stop]` to `dst[dst_off:dst_off+stop-start]`. `dst` can be a
     Java array of the same type. If `arr` is a primitive array, `dst` can also be `bytearray`,
-    `array.array` with an equivilent typecode or 'B', or a writable buffer-object or memoryview of
-    the same type or bytes. If `dst` uses bytes then the data is copied to
+    `array.array` with an equivilent typecode or 'B', or a writable buffer-object or `memoryview`
+    of the same type or bytes. If `dst` uses bytes then the data is copied to
     `dst[dst_off:dst_off+sizeof(primitiveType)*(stop-start)]` (notably the `dst_off` is used as-is).
+
+ * `arr.copyfrom(src, [start], [stop], [src_off])`
+  
+    Copies the data to `arr[start:stop]` from `src[src_off:src_off+stop-start]`. `src` can be a
+    Java array of the same type. If `arr` is a primitive array, `src` can also be `bytearray`,
+    `bytes`, `unicode` (if `arr` is a char array), `array.array` with an equivilent typecode or 'B',
+    a writable buffer-object or `memoryview` of the same type or bytes, or a sequence-like object.
+    If `src` uses bytes then the data is copied from `src[src_off:src_off+sizeof(primitiveType)*(stop-start)]`
+    (notably the `src_off` is used as-is).
 
 They also support several methods that utilize or emulate the functions in `java.util.Arrays`:
 
@@ -572,20 +584,19 @@ A few other methods and utilities are available in `J` module:
 
 Planned Future Enhancements
 ---------------------------
- * Inner classes automatically know the outer class instance and incorporate it into the constructor
- * `java.nio.ByteBuffer` and other `java.nio.Buffer` class templates and conversions for `bytes`,
+ * Add `java.nio.ByteBuffer` and other `java.nio.Buffer` class templates and conversions for `bytes`,
    `bytearray`, `unicode`, `array.array`, buffer-object to them
  * Support buffer protocol for multi-dimensional primitive arrays
  * Support critical buffer access for primitive arrays and either periodically commiting writable
    buffers or adding a method to commit them
  * Support GUI functions on Mac (supposedly needs some extra work)
- * Re-route `System.out`, `System.err`, and `System.in` to Python `sys.stdout`, `sys.stderr`, and `sys.stdin`
  * Make `super(...)` work as excepted for Java classes using `CallNonvirtual<Type>Method` and `Get/Set<Type>Field`
    [see https://docs.oracle.com/javase/specs/jls/se8/html/jls-15.html]
  * Method resolution identical to Java
  * Deal with weak references
  * Subclassing Java classes, in particular making wrappers for Python `tuple`/`list`, `set`/`frozenset`, and
    `dict` objects to act as `java.util.List`, `java.util.Set`, and `java.util.Map` objects
+ * Re-route `System.out`, `System.err`, and `System.in` to Python `sys.stdout`, `sys.stderr`, and `sys.stdin`
  * Make Java annotations work like Python decorators
  * Pickling of `java.lang.Serializable` objects 
  * Generic types
