@@ -89,7 +89,7 @@ if __name__ == '__main__':
     # Check if we want to build with assertion info
     debug = ('-g' in sys.argv) or ('--debug' in sys.argv)
     
-    setup(name='JVM',
+    setup(name='pyjvm',
           version='0.1', # TODO
           description='Seamless access of the Java VM from within Python',
           long_description="""
@@ -99,14 +99,14 @@ wrapped in Python objects and using them becomes seamless from within Python. Py
 the integration as seamless as possible, for example making Java objects that implement
 java.util.Iterable are iterable in Python as well.
 
-To get started, simply import jvm. After that you just need start importing the classes you want to
-use from the J module. The J module is the 'master' module and has the entire Java namespace is
-available under it. For example:
+To get started, simply `import jvm`. After that you just need start importing the classes you want
+to use from the `J` module. The `J` module is the 'master' module and has the entire Java namespace
+is available under it. For example:
 
     from J.java.lang import System
     System.out.println('Hello World!')
 
-Additionally, the java and javax namespaces are also directly importable:
+Additionally, the `java` and `javax` namespaces are also directly importable:
 
     from java.lang import System
     System.out.println('Hello World!')
@@ -125,6 +125,7 @@ For more information, see the included README.md file or using `help(jvm)`.
                        'Programming Language :: Python :: 2.7',
                        'Programming Language :: Python :: 3'
                        ],
+          keywords=['java','integration','jvm','jar'],
           license='GPLv3+',
           data_files=[('jvm',['README.md','LICENSE.md'])],
           ext_modules=cythonize([Extension(**ext_info(debug))]))
