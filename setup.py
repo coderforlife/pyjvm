@@ -91,8 +91,30 @@ if __name__ == '__main__':
     
     setup(name='JVM',
           version='0.1', # TODO
-          description='Java VM access from within Python',
-          long_description="""....""", # TODO
+          description='Seamless access of the Java VM from within Python',
+          long_description="""
+This uses JNI to give access to all of Java from Python. On top of that it uses Java reflection to
+be able to automatically discover Java classes, their methods and their fields. The classes are
+wrapped in Python objects and using them becomes seamless from within Python. PyJVM tries to make
+the integration as seamless as possible, for example making Java objects that implement
+java.util.Iterable are iterable in Python as well.
+
+To get started, simply import jvm. After that you just need start importing the classes you want to
+use from the J module. The J module is the 'master' module and has the entire Java namespace is
+available under it. For example:
+
+    from J.java.lang import System
+    System.out.println('Hello World!')
+
+Additionally, the java and javax namespaces are also directly importable:
+
+    from java.lang import System
+    System.out.println('Hello World!')
+
+For the most part, the objects should behave as you might expect.
+
+For more information, see the included README.md file or using `help(jvm)`.
+""",
           author='Jeffrey Bush',
           author_email='jeff@coderforlife.com',
           url='https://github.com/coderforlife/pyjvm',
@@ -104,5 +126,5 @@ if __name__ == '__main__':
                        'Programming Language :: Python :: 3'
                        ],
           license='GPLv3+',
-          data_files=[('jvm',['README.md'])], # TODO
+          data_files=[('jvm',['README.md','LICENSE.md'])],
           ext_modules=cythonize([Extension(**ext_info(debug))]))
