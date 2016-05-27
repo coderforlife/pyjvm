@@ -61,7 +61,7 @@ def __debug(*args):
 
 # For displaying pointers
 cdef unicode __str_ptr = "%0"+str(sizeof(void*)*2)+"X"
-cdef inline unicode str_ptr(const void* p): return __str_ptr % (<long>p)
+cdef inline unicode str_ptr(const void* p): return __str_ptr % (<size_t>p)
 
 # For dealing with Python 2/3 differences
 cdef inline unicode to_unicode(basestring s):

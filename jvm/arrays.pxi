@@ -279,16 +279,17 @@ IF PY_VERSION >= PY_VERSION_3_3 or PY_UNICODE_WIDE:
         cdef JPrimArrayPointer ptr = JPrimArrayPointer(env, dst, readonly=False)
         set_char_array_from_ucs4((<const PyUCS4*>src)+src_off, n_src, (<Py_UCS2*>ptr.ptr)+dst_off)
         return 0
-    cdef inline jsize __get_addl_chars_needed(const PyUCS4* s, Py_ssize_t n) nogil:
+    cdef inline jsize __get_addl_chars_needed(const PyUCS4* s, Py_ssize_t n) except -1:
         cdef const PyUCS4* end = s + n
         n = 0
         while s < end: n += s[0] >= 0x10000; s += 1
-        return n
+        if sizeof(Py_ssize_t) > sizeof(jsize) and n > 0x7FFFFFFF: raise OverflowError()
+        return <jsize>n
 IF PY_VERSION >= PY_VERSION_3_3:
     cdef inline Py_ssize_t get_unicode_len(unicode uni): return PyUnicode_GET_LENGTH(uni)
 ELSE:
     cdef inline Py_ssize_t get_unicode_len(unicode uni): return PyUnicode_GET_SIZE(uni)
-cdef inline jsize get_addl_chars_needed(unicode uni, jsize i, jsize n):
+cdef inline jsize get_addl_chars_needed(unicode uni, jsize i, jsize n) except -1:
     """Counts the number of surrogate pairs required to encode the unicode string"""
     IF PY_VERSION >= PY_VERSION_3_3:
         if PyUnicode_KIND(uni) == PyUnicode_4BYTE_KIND:
@@ -956,7 +957,7 @@ cdef class JPrimitiveArray(JArray):
                 src_off += get_unicode_len(src)
                 if src_off < 0: src_off = 0
             IF PY_VERSION >= PY_VERSION_3_3:
-                if PyUnicode_KIND(uni) == PyUnicode_4BYTE_KIND:
+                if PyUnicode_KIND(src) == PyUnicode_4BYTE_KIND:
                     copy_char_array_from_ucs4(env, PyUnicode_DATA(src), src_off, PyUnicode_GET_LENGTH(src), self, i, n)
                 else:
                     if src_off+n > get_unicode_len(src): raise ValueError('not enough elements in source unicode')

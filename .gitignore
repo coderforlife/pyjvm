@@ -5,6 +5,8 @@ __pycache__/
 
 # C extensions
 *.so
+jvm/_internal.c
+jvm/config.pxi
 
 # Distribution / packaging
 .Python
