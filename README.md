@@ -1,11 +1,11 @@
 PyJVM - Java bindings for Python
 ==============================
 
-This uses JNI to give access to all of Java from Python. On top of that it uses lots of Java
-reflection to be able to automatically discover Java classes, their methods and their fields. The
-classes are wrapped in Python objects and using them becomes seamless from within Python. PyJVM
-tries to make the integration as seamless as possible, for example making Java objects that
-implement `java.util.Iterable` iterable in Python as well.
+PyJVM uses JNI to give access to all of Java from Python. On top of that it uses Java reflection
+to be able to automatically discover Java classes, their methods and their fields. The classes are
+wrapped in Python objects and using them becomes seamless from within Python. PyJVM tries to make
+the integration as seamless as possible, for example making Java objects that implement
+`java.util.Iterable` iterable in Python as well.
 
 To get started, simply `import jvm`. After that you just need start importing the classes you want
 to use from the `J` module. The `J` module is the 'master' module and has the entire Java namespace
@@ -96,7 +96,7 @@ objects:
 
     rand = java.util.Random(100)                  # call a constructor
 
-Additionally, the classes are setup so isinstance and issubclass work. For example:
+Additionally, the classes are setup so `isinstance` and `issubclass` work. For example:
 
     issubclass(java.util.HashMap, java.util.Map)  # returns True
     m = java.util.HashMap()
@@ -260,8 +260,8 @@ The other predefined class templates are:
        * `java.nio.charset.CharacterCodingException`, `java.nio.charset.CoderMalfunctionError`, `java.io.UTFDataFormatException`, `java.io.UnsupportedEncodingException`, `java.io.CharConversionException`
 
 
-Defining Class Templates
-------------------------
+Custom Class Templates
+----------------------
 You can define additional class templates as well. One limitation though is that the class template
 must be defined before the Java class is ever used. To create a class template, create a new Python
 class that either has some other Java interface or class as a base or has the metaclass `JavaClass`.
@@ -287,6 +287,10 @@ are also placed where they are listed, or at the very end if not listed at all.
 
 **Note:** class templates only effect the classes/objects as they appear in Python and have no
 influence on the Java code itself
+
+**Note:** if the class has already be used before you get a chance to create a template for it,
+the custom class template can still be created by monkey-patching the `JavaClass` object for the
+class.
 
 
 Automatic Conversion
@@ -565,7 +569,7 @@ a 9-element array containing java.lang.Objects:
 
 The class of the array can be obtained with and empty slice:
 
-    cls = java.lang.Object[:]  # equivilent of the Java code Class<Object[]> cls = Object[].class
+    cls = java.lang.Object[:]  # equivilent to the Java code Class<Object[]> cls = Object[].class
 
 **Note:** when using `dir` on Java arrays, only the methods defined in `java.lang.Object` show up,
 all of the methods and fields listed above must be used directly without introspection
