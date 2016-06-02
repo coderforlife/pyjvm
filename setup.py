@@ -18,7 +18,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
 from __future__ import division
-from __future__ import unicode_literals
+#from __future__ import unicode_literals
 from __future__ import print_function
 from __future__ import absolute_import
 
@@ -36,21 +36,25 @@ def check_java_version():
 def ext_info(debug):
     from jvm._util import jdk_home, is_win, is_mac, is_nix, is_x64
     from os.path import join, exists
+    from glob import iglob
+    def F(f): return join('jvm', f)
     jdk = jdk_home()
     ext = {
-        'name': str('jvm._internal'),
-        'sources': [str(join('jvm','_internal.pyx'))],
+        'name':      'jvm._internal',
+        'sources':   [F('_internal.pyx')],
         'libraries': ['jvm'],
+        'depends':   [F('_internal.pyx')] + \
+                     [F(f) for f in iglob(join('jvm','*.h'))] + \
+                     [F(f) for f in iglob(join('jvm','*.pxi'))],
         }
-
+    
     if not debug: ext['define_macros'] = [('PYREX_WITHOUT_ASSERTIONS',None)]
-        
     if is_win:
         platform = 'win32'
         # Use the MSVC lib in the JDK
         ext['extra_link_args'] = ['/MANIFEST']
         ext['library_dirs'] = [join(jdk, 'lib')]
-        #Disable warnings about unreferenced local variable / label and formal param different from decl
+        # Disable warnings about unreferenced local variable / label and formal param different from decl
         ext['extra_compile_args'] = ['/wd4101','/wd4102', '/wd4028']
     else:
         if is_mac:
@@ -64,10 +68,16 @@ def ext_info(debug):
     ext['include_dirs'] = [inc, join(inc, platform)]
     return ext
 
+try:
+    from Cython.Build import cythonize
+except ImportError:
+    # Don't have Cython? That's okay, just compile the sources.
+    def cythonize(exts):
+        for ext in exts: ext.sources = [s[:-4]+'.c' for s in ext.sources] # replace .pyx with .c
+
 if __name__ == '__main__':
     from setuptools import setup, Extension
-    from Cython.Build import cythonize
-    from os.path import join, dirname
+    from os.path import join, dirname, basename
     import sys
 
     # Check the Python and Java versions
@@ -88,6 +98,9 @@ if __name__ == '__main__':
 
     # Check if we want to build with assertion info
     debug = ('-g' in sys.argv) or ('--debug' in sys.argv)
+                      
+    # Get the extension information
+    ext = ext_info(debug)
     
     setup(name='pyjvm',
           version='0.1', # TODO
@@ -118,7 +131,7 @@ For more information, see the included README.md file or using `help(jvm)`.
           author='Jeffrey Bush',
           author_email='jeff@coderforlife.com',
           url='https://github.com/coderforlife/pyjvm',
-          packages=[str('jvm')],
+          packages=['jvm'],
           classifiers=['Development Status :: 3 - Alpha',
                        'License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)',
                        'Programming Language :: Java',
@@ -128,4 +141,4 @@ For more information, see the included README.md file or using `help(jvm)`.
           keywords=['java','integration','jvm','jar'],
           license='GPLv3+',
           data_files=[('jvm',['README.md','LICENSE.md'])],
-          ext_modules=cythonize([Extension(**ext_info(debug))]))
+          ext_modules=cythonize([Extension(**ext)]))

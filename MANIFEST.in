@@ -1,0 +1,4 @@
+include *.md
+global-include *.pyx *.pxi *.h
+
+

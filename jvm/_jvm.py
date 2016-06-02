@@ -284,7 +284,7 @@ class JavaPackage(types.ModuleType):
             # A known protected/private child class
             raise AttributeError(name)
         # Some internal Python and IPython attributes that need to be filtered out to not produce errors
-        elif name in ('__loader__', '__path__', '__file__', '__cache__', '__spec__', '__methods__',
+        elif name in ('__loader__', '__pa''th__', '__fi''le__', '__cache__', '__spec__', '__methods__',
                       '_ipython_display_', '_repr_jpeg_', '_repr_html_', '_repr_svg_', '_repr_png_',
                       '_repr_javascript_', '_repr_markdown_', '_repr_latex_', '_repr_json_', '_repr_pdf_',
                       '_getAttributeNames', 'trait_names'):
