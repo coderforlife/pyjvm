@@ -164,8 +164,8 @@ return type/`JavaClass` that will be created, and the object is it bound to (if 
 constructor or static method).
 
 When a method is not called or the brackets are not used on it, it is a `J.JavaMethods` object which
-can also be passed around and is bound to the original object (if it wasnt a static method). It also
-can be queried for the bound object and class and name. Additionally, it can be iterated over,
+can also be passed around and is bound to the original object (if it wasn't a static method). It
+also can be queried for the bound object and class and name. Additionally, it can be iterated over,
 yielding `JavaMethod` objects. Similarily, a `JavaClass` object can be iterated over yeilding the
 `JavaConstructor` objects.
 
@@ -221,7 +221,7 @@ The other predefined class templates are:
  * `java.util.Map.Entry` implements `collections.Sequence`, pretending to be a 2-element `tuple` of
    key and value so that `java.util.Map.popitem()` and `java.util.Map.items()` work like expected
    in Python
- * `java.lang.Boolean` defines `__nonzero__`/`__bool__` as booleanValue
+ * `java.lang.Boolean` defines `__nonzero__`/`__bool__` as `booleanValue`
  * `java.lang.Number` defines `__nonzero__`/`__bool__`, `__int__`, `__long__` as `longValue` and
    `__float__` as `doubleValue`
  * `java.lang.Byte`, `java.lang.Short`, `java.lang.Integer`, and `java.lang.Long` define `__index__`
@@ -520,9 +520,9 @@ arrays:
  * Both of them support writable buffers, however the writes likely won't show up in the Java
    array until the buffer is released
 
-While all of these features help you if you can an array back from a Java method, but what if you
-need to create an array yourself? Well, there is a separate method for each of the primitive types
-and the reference, or object, array type in the `J` module.
+While all of these features help you if you can get an array back from a Java method, but what if
+you need to create an array yourself? Well, there is a separate method for each of the primitive
+types and the reference, or object, array type in the `J` module.
 
  * `J.boolean_array(*args)`
  * `J.byte_array(*args)`
@@ -537,7 +537,7 @@ and the reference, or object, array type in the `J` module.
    any arguments, then a length-0 array is created. For a single argument, the following values are
    acceptable:
 
-    * integer - creates a length-n array is created
+    * integer - creates a length-n array
     * Java array of same primitive type - creates a copy of the array
     * `array.array` of an appropiate typecode of 'B' - creates an array with a copy of data
     * `bytes`/`bytearray` - creates an array with a copy of data
@@ -567,7 +567,7 @@ a 9-element array containing java.lang.Objects:
 
     arr = java.lang.Object[9]
 
-The class of the array can be obtained with and empty slice:
+The class of the array can be obtained with an empty slice:
 
     cls = java.lang.Object[:]  # equivilent to the Java code Class<Object[]> cls = Object[].class
 
