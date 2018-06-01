@@ -78,7 +78,7 @@ def java_home():
         try:
             path = run('/usr/bin/which', 'java')[0]
             path = run('readlink', '-f', path)[0]
-            path = dirname(dirname(dirname(path)))
+            path = dirname(dirname(path))
             return set_java_home(path)
         except Exception: pass
     elif is_win:
@@ -109,7 +109,10 @@ def jdk_home():
                 cv = unicode(winreg.QueryValueEx(k, 'CurrentVersion')[0])
                 return unicode(winreg.QueryValueEx(winreg.OpenKey(k, cv), 'JavaHome')[0])
             except Exception: pass
-    else: return java_home()
+    else:
+        jdk = java_home()
+        if os.path.basename(jdk) == 'jre': jdk = os.path.dirname(jdk)
+        return jdk
     raise RuntimeError('Cannot find a compatible Java, install the JDK or set the environmental variable JDK_HOME to its location')
 
 def find_libjvms(java_home, name):

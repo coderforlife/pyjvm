@@ -71,13 +71,16 @@ def ext_info(debug):
 try:
     from Cython.Build import cythonize
 except ImportError:
-    # Don't have Cython? That's okay, just compile the sources.
+    # Don't have Cython? That may be okay, just compile the sources.
     def cythonize(exts):
+        from os.path import isfile
         for ext in exts: ext.sources = [s[:-4]+'.c' for s in ext.sources] # replace .pyx with .c
+        if any((any(not isfile(s) for s in ext.sources)) for ext in exts):
+            raise FileNotFoundError('No Cython and no source files - cannot compile')
 
 if __name__ == '__main__':
     from setuptools import setup, Extension
-    from os.path import join, dirname, basename
+    from os.path import join, dirname, basename, isfile
     import sys
 
     # Check the Python and Java versions
@@ -92,7 +95,8 @@ if __name__ == '__main__':
     config += 'DEF PY_UNICODE_WIDE=%s\n'%(sys.hexversion<0x03030000 and sys.maxunicode>65535)
     config_file = join(dirname(__file__), 'jvm','config.pxi')
     same = False
-    with open(config_file, 'r') as f: same = f.read() == config
+    if isfile(config_file):
+        with open(config_file, 'r') as f: same = f.read() == config
     if not same:
         with open(config_file, 'w') as f: f.write(config)
 

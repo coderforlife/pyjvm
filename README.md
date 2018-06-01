@@ -7,6 +7,18 @@ wrapped in Python objects and using them becomes seamless from within Python. Py
 the integration as seamless as possible, for example making Java objects that implement
 `java.util.Iterable` iterable in Python as well.
 
+
+Installation
+----------------
+You must have a JDK and JRE installed along with the Cython package. The JDK and JRE should be
+automatically found in an OS-depedent manner, but their location can also be specified using the
+`JDK_HOME` and `JAVA_HOME` environmental variables during setup and when running. `pip` can be
+used to install the package once these requirements are met.
+
+
+Getting Started
+----------------
+
 To get started, simply `import jvm`. After that you just need start importing the classes you want
 to use from the `J` module. The `J` module is the 'master' module and has the entire Java namespace
 is available under it. For example:
