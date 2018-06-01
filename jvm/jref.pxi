@@ -695,7 +695,7 @@ cdef class JClass(object):
     cdef inline JClass create_primitive(JNIEnv* env, unicode cn, unicode name, JClassFuncs* funcs):
         """Creates a JClass object for a primitive type given its clazz, name, and functions."""
         # Should not raise errors here, so access functions directly instead of with JEnv wrappers
-        cdef jclass clazz = FindClass(env, cn), clazz_prim
+        cdef jclass clazz = FindClass(env, to_utf8j(cn)), clazz_prim
         cdef JClass c = JClass()
         cdef jfieldID fid = GetStaticFieldID(env, clazz, b'TYPE', b'Ljava/lang/Class;')
         clazz_prim = <jclass>GetStaticObjectField(env, clazz, fid)

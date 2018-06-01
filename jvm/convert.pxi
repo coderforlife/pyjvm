@@ -634,9 +634,9 @@ cdef int init_p2j(JEnv env) except -1:
         global p2j_conv_bytes2str
         p2j_conv_bytes2str = P2JConvert.create_cy(__p2j_conv_bytes2str)
 
-    import types, array, decimal, datetime
+    import array, decimal, datetime
     global p2js; p2js = [
-        P2J.create_cy(env, types.NoneType, None, p2j_check_none),
+        P2J.create_cy(env, type(None), None, p2j_check_none),
         P2J.create_cy(env, get_java_class('java.lang.Object'), None, p2j_check_object),
         P2J.create_cy(env, JavaClass,         'java.lang.Class',       p2j_check_javaclass),
         P2J.create_cy(env, unicode,           'java.lang.Enum',        p2j_check_enum),

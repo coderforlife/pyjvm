@@ -250,7 +250,6 @@ cdef class JVM(object):
     cpdef int run_action(self, JVMAction action) except -1:
         """Runs a JVM action on the main JVM thread. This function returns immediately."""
         assert self.action_queue is not None
-        import threading
         action.event.clear()
         action.exc = None
         action.tb = None
