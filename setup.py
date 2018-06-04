@@ -33,19 +33,17 @@ def check_java_version():
         sys.stderr.write('Requires at least Java SE 6\n')
         exit(1)
 
-def ext_info(debug):
+def get_ext(name, debug):
     from jvm._util import jdk_home, is_win, is_mac, is_nix, is_x64
-    from os.path import join, exists
+    from os.path import join, exists, sep
     from glob import iglob
     def F(f): return join('jvm', f)
     jdk = jdk_home()
+    pyx = F(name.replace('.', sep) + '.pyx')
     ext = {
-        'name':      'jvm._internal',
-        'sources':   [F('_internal.pyx')],
+        'name':      'jvm.' + name,
+        'sources':   [pyx],
         'libraries': ['jvm'],
-        'depends':   [F('_internal.pyx')] + \
-                     [F(f) for f in iglob(join('jvm','*.h'))] + \
-                     [F(f) for f in iglob(join('jvm','*.pxi'))],
         }
     
     if not debug: ext['define_macros'] = [('PYREX_WITHOUT_ASSERTIONS',None)]
@@ -66,7 +64,7 @@ def ext_info(debug):
         ext['extra_compile_args'] = ['-Wno-unused-variable','-Wno-unused-label']
     inc = join(jdk, 'include')
     ext['include_dirs'] = [inc, join(inc, platform)]
-    return ext
+    return Extension(**ext)
 
 try:
     from Cython.Build import cythonize
@@ -93,7 +91,7 @@ if __name__ == '__main__':
     # Otherwise it has to re-cythonize for no reason
     config = 'DEF PY_VERSION=0x%08x\n'%sys.hexversion
     config += 'DEF PY_UNICODE_WIDE=%s\n'%(sys.hexversion<0x03030000 and sys.maxunicode>65535)
-    config_file = join(dirname(__file__), 'jvm','config.pxi')
+    config_file = join(dirname(__file__), 'jvm', 'internal', 'config.pxi')
     same = False
     if isfile(config_file):
         with open(config_file, 'r') as f: same = f.read() == config
@@ -102,10 +100,8 @@ if __name__ == '__main__':
 
     # Check if we want to build with assertion info
     debug = ('-g' in sys.argv) or ('--debug' in sys.argv)
-                      
-    # Get the extension information
-    ext = ext_info(debug)
     
+    # Run the setup
     setup(name='pyjvm',
           version='0.1', # TODO
           description='Seamless access of the Java VM from within Python',
@@ -135,7 +131,7 @@ For more information, see the included README.md file or using `help(jvm)`.
           author='Jeffrey Bush',
           author_email='jeff@coderforlife.com',
           url='https://github.com/coderforlife/pyjvm',
-          packages=['jvm'],
+          packages=['jvm','jvm.internal'],
           classifiers=['Development Status :: 3 - Alpha',
                        'License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)',
                        'Programming Language :: Java',
@@ -145,4 +141,14 @@ For more information, see the included README.md file or using `help(jvm)`.
           keywords=['java','integration','jvm','jar'],
           license='GPLv3+',
           data_files=[('jvm',['README.md','LICENSE.md'])],
-          ext_modules=cythonize([Extension(**ext)]))
+          ext_modules=cythonize([
+              get_ext('internal.utils', debug),
+              get_ext('internal.unicode', debug),
+              get_ext('internal.core', debug),
+              get_ext('internal.objects', debug),
+              get_ext('internal.convert', debug),
+              get_ext('internal.arrays', debug),
+              get_ext('internal.packages', debug),
+              get_ext('internal.numbers', debug),
+              get_ext('internal.collections', debug),
+          ]))

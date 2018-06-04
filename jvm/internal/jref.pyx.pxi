@@ -47,7 +47,7 @@ Internal values:
     ConstructorDef - common jmethodIDs needed from java.lang.reflect.Constructor
     RunnableDef    - common jmethodIDs needed from java.lang.Runnable
     ThreadDef      - common jmethodIDs needed from java.lang.Thread
-    
+
 Internal functions:
     box_<primitive>   - box a primitive value, one function for each primitive type
     protection_prefix - get the Python prefix (e.g. '__') for an access modifier
@@ -59,29 +59,13 @@ FUTURE:
     handle generics and annotations
 """
 
+#from __future__ import absolute_import
 
-########## Java Class/Constructor/Method/Field Modifiers ##########
-cdef enum Modifiers:        # allowed on Interface, Class, Constructor, Method, Field?
-    # package-private = absence of PUBLIC | PRIVATE | PROTECTED
-    PUBLIC       = 0x001    # ICCMF
-    PRIVATE      = 0x002    # ICCMF
-    PROTECTED    = 0x004    # ICCMF
-    STATIC       = 0x008    # IC MF
-    FINAL        = 0x010    #  C MF  (ignored for classes and methods)
-    SYNCHRONIZED = 0x020    #    M   (ignored)
-    VOLATILE     = 0x040    #     F  (ignored)
-    TRANSIENT    = 0x080    #     F  (ignored)
-    NATIVE       = 0x100    #    M   (ignored)
-    INTERFACE    = 0x200
-    ABSTRACT     = 0x400    # IC M   (ignored)
-    STRICT       = 0x800    # IC M   (ignored)
-    # Undocumented values:
-    # BRIDGE     = 0x0040
-    # VARARGS    = 0x0080
-    # SYNTHETIC  = 0x1000
-    # ANNOTATION = 0x2000
-    # ENUM       = 0x4000
-    # MANDATED   = 0x8000
+from .utils cimport VALUES
+from .jni cimport JNIEnv, jclass, jobject, jmethodID, jfieldID, jvalue, jsize
+#from .jvm cimport jvm_add_init_hook, jvm_add_dealloc_hook, JVMAction
+#from .jenv cimport JEnv, jenv, obj2py
+
 
 ########## Simple JNIEnv Wrappers ##########
 # These are used before the environment is fully ready to get the reflection classes and methods.
@@ -101,29 +85,36 @@ cdef inline void DeleteGlobalRef(JNIEnv *env, jobject globalRef) nogil: env[0].D
 cdef inline jobject NewLocalRef(JNIEnv *env, jobject obj) nogil: return env[0].NewLocalRef(env, obj)
 cdef inline void DeleteLocalRef(JNIEnv *env, jobject localRef) nogil: env[0].DeleteLocalRef(env, localRef)
 
+
+########## Call Java functions that return Object arrays ##########
+ctypedef object (*obj2py)(JEnv, jobject)
+cdef inline list objs2list(JEnv env, jobjectArray arr, obj2py conv):
+    """
+    Converts a jobjectArray to a Python list. Each object in the array is given to the provided
+    function. If arr is NULL, returns None. The array is deleted and the `conv` function should
+    delete the object references it is given as well.
+    """
+    if arr is NULL: return None
+    cdef jsize i, length
+    cdef list lst
+    cdef jobject o
+    try:
+        length = env.GetArrayLength(arr)
+        lst = PyList_New(length)
+        for i in xrange(length):
+            pyobj = conv(env, env.GetObjectArrayElement(arr, i))
+            Py_INCREF(pyobj)
+            PyList_SET_ITEM(lst, i, pyobj)
+    finally: env.DeleteRef(arr)
+    return lst
+cdef inline list call2list(JEnv env, jobject obj, jmethodID method, obj2py conv, jvalue* args = NULL):
+    return objs2list(env, <jobjectArray>env.CallObject(obj, method, args), conv)
+
+
 ########## Java Class Functions ##########
 # Each instance of this class represents the collections of functions that are specific to a single
 # type, so all the ones that have <type> in them. Additionally, the size of primitive types, the
 # signature, and the struct module format specifier for the type.
-ctypedef object (*GetField)(JEnv env, jobject obj, jfieldID fieldID)
-ctypedef int (*SetField)(JEnv env, jobject obj, JField field, object value) except -1
-ctypedef object (*GetStaticField)(JEnv env, jclass clazz, jfieldID fieldID)
-ctypedef int (*SetStaticField)(JEnv env, jclass clazz, JField field, object value) except -1
-ctypedef object (*CallMethod)(JEnv env, jobject obj, jmethodID methodID, const jvalue *args, bint withgil)
-ctypedef object (*CallNVMethod)(JEnv env, jobject obj, jclass clazz, jmethodID methodID, const jvalue *args, bint withgil)
-ctypedef object (*CallStaticMethod)(JEnv env, jclass clazz, jmethodID methodID, const jvalue *args, bint withgil)
-ctypedef jarray (*NewPrimArray)(JEnv env, jsize length) except NULL
-cdef struct JClassFuncs:
-    char sig
-    Py_ssize_t itemsize
-    CallMethod call
-    CallNVMethod call_nv
-    CallStaticMethod call_static
-    GetField get
-    SetField set
-    GetStaticField get_static
-    SetStaticField set_static
-    NewPrimArray new_array
 cdef void create_JCF(JClassFuncs* jcf, char sig, Py_ssize_t itemsize,
         CallMethod call, CallNVMethod call_nv, CallStaticMethod call_static,
         GetField get, SetField set, GetStaticField get_static, SetStaticField set_static,
@@ -182,15 +173,12 @@ cdef int init_jcf(JEnv env) except -1:
         JEnv.GetDoubleField, JEnv.SetDoubleField, JEnv.GetStaticDoubleField, JEnv.SetStaticDoubleField,
         JEnv.NewDoubleArray)
     return 0
-JVM.add_init_hook(init_jcf)
+jvm_add_init_hook(init_jcf, 1)
 
 
 ########## Basic Classes and Methods ##########
 # These are the classes and methods that are internally used. They are cached in these structures
 # upon first use. Mostly these are for reflection or common classes and methods.
-cdef struct JObjectDef:
-    jclass clazz
-    jmethodID equals, toString, clone, hashCode
 cdef void init_ObjectDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/Object')
     ObjectDef.clazz = <jclass>NewGlobalRef(env, C)
@@ -208,9 +196,6 @@ cdef void dealloc_ObjectDef(JNIEnv* env) nogil:
     ObjectDef.clone    = NULL
     ObjectDef.hashCode = NULL
 
-cdef struct JSystemDef:
-    jclass clazz
-    jmethodID arraycopy, getProperty, gc, identityHashCode # static
 cdef void init_SystemDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/System')
     SystemDef.clazz       = <jclass>NewGlobalRef(env, C)
@@ -226,13 +211,6 @@ cdef void dealloc_SystemDef(JNIEnv* env) nogil:
     SystemDef.getProperty = NULL
     SystemDef.identityHashCode = NULL
 
-cdef struct JClassLoaderDef:
-    jclass clazz
-    jmethodID getParent
-    jmethodID getSystemClassLoader # static
-cdef struct JURLClassLoaderDef:
-    jclass clazz
-    jmethodID addURL, getURLs
 cdef void init_ClassLoaderDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/ClassLoader')
     ClassLoaderDef.clazz     = <jclass>NewGlobalRef(env, C)
@@ -254,12 +232,6 @@ cdef void dealloc_ClassLoaderDef(JNIEnv* env) nogil:
     URLClassLoaderDef.addURL  = NULL
     URLClassLoaderDef.getURLs = NULL
 
-cdef struct JFileDef:
-    jclass clazz
-    jmethodID ctor, toURI
-cdef struct JURIDef:
-    jclass clazz
-    jmethodID toURL
 cdef void init_FileDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/io/File')
     FileDef.clazz = <jclass>NewGlobalRef(env, C)
@@ -279,10 +251,6 @@ cdef void dealloc_FileDef(JNIEnv* env) nogil:
     URIDef.clazz = NULL
     URIDef.toURL = NULL
     
-cdef struct JPackageDef:
-    jclass clazz
-    jmethodID getName
-    jmethodID getPackage # static
 cdef void init_PackageDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/Package')
     PackageDef.clazz      = <jclass>NewGlobalRef(env, C)
@@ -295,12 +263,6 @@ cdef void dealloc_PackageDef(JNIEnv* env) nogil:
     PackageDef.getName    = NULL
     PackageDef.getPackage = NULL
 
-cdef struct JClassDef:
-    jclass clazz
-    jmethodID getName, getSimpleName, getPackage, getEnclosingClass, getDeclaringClass, getModifiers
-    jmethodID getDeclaredFields, getDeclaredMethods, getDeclaredConstructors, getDeclaredClasses
-    jmethodID getInterfaces, isInterface, isEnum, isArray, getComponentType
-    jmethodID isAnonymousClass, isLocalClass, isMemberClass #, isSynthetic
 cdef void init_ClassDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/Class')
     ClassDef.clazz = <jclass>NewGlobalRef(env, C)
@@ -353,17 +315,14 @@ cdef void dealloc_ClassDef(JNIEnv* env) nogil:
     ClassDef.isMemberClass      = NULL
     #ClassDef.isSynthetic        = NULL
 
-cdef struct JFieldDef:
-    jclass clazz
-    jmethodID getName, getType, getModifiers #, isSynthetic
 cdef void init_FieldDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/reflect/Field')
     FieldDef.clazz = <jclass>NewGlobalRef(env, C)
     FieldDef.getName      = GetMethodID(env, C, b'getName',      b'()Ljava/lang/String;')
     FieldDef.getType      = GetMethodID(env, C, b'getType',      b'()Ljava/lang/Class;')
+    FieldDef.getDeclaringClass = GetMethodID(env, C, b'getDeclaringClass', b'()Ljava/lang/Class;')
     FieldDef.getModifiers = GetMethodID(env, C, b'getModifiers', b'()I')
     #FieldDef.isSynthetic  = GetMethodID(env, C, b'isSynthetic',  b'()Z')
-    # Parent: getDeclaringClass()
     # Generics: getGenericType()
     # Annotations: getDeclaredAnnotations()
     # Other: isEnumConstant()
@@ -373,26 +332,24 @@ cdef void dealloc_FieldDef(JNIEnv* env) nogil:
     FieldDef.clazz        = NULL
     FieldDef.getName      = NULL
     FieldDef.getType      = NULL
+    FieldDef.getDeclaringClass = NULL
     FieldDef.getModifiers = NULL
     #FieldDef.isSynthetic  = NULL
 
-cdef struct JMethodDef:
-    jclass clazz
-    jmethodID getName, getReturnType, getParameterTypes, getModifiers, isVarArgs #, isBridge, isSynthetic
 cdef void init_MethodDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/reflect/Method')
     MethodDef.clazz = <jclass>NewGlobalRef(env, C)
     MethodDef.getName           = GetMethodID(env, C, b'getName',           b'()Ljava/lang/String;')
     MethodDef.getReturnType     = GetMethodID(env, C, b'getReturnType',     b'()Ljava/lang/Class;')
     MethodDef.getParameterTypes = GetMethodID(env, C, b'getParameterTypes', b'()[Ljava/lang/Class;')
+    MethodDef.getExceptionTypes = GetMethodID(env, C, b'getExceptionTypes', b'()[Ljava/lang/Class;')
+    MethodDef.getDeclaringClass = GetMethodID(env, C, b'getDeclaringClass', b'()Ljava/lang/Class;')
     MethodDef.getModifiers      = GetMethodID(env, C, b'getModifiers',      b'()I')
     MethodDef.isVarArgs         = GetMethodID(env, C, b'isVarArgs',         b'()Z')
     #MethodDef.isBridge          = GetMethodID(env, C, b'isBridge',          b'()Z')
     #MethodDef.isSynthetic       = GetMethodID(env, C, b'isSynthetic',       b'()Z')
-    # Parent: getDeclaringClass()
-    # Generics: getGenericParameterTypes(), getGenericReturnType(), getTypeParameters()
+    # Generics: getGenericParameterTypes(), getGenericReturnType(), getTypeParameters(), getGenericExceptionTypes()
     # Annotations: getDeclaredAnnotations(), getParameterAnnotations(), getDefaultValue()
-    # Exceptions: getExceptionTypes(), getGenericExceptionTypes()
     DeleteLocalRef(env, C)
 cdef void dealloc_MethodDef(JNIEnv* env) nogil:
     if MethodDef.clazz is not NULL: DeleteGlobalRef(env, MethodDef.clazz)
@@ -400,39 +357,37 @@ cdef void dealloc_MethodDef(JNIEnv* env) nogil:
     MethodDef.getName           = NULL
     MethodDef.getReturnType     = NULL
     MethodDef.getParameterTypes = NULL
+    MethodDef.getExceptionTypes = NULL
+    MethodDef.getDeclaringClass = NULL
     MethodDef.getModifiers      = NULL
     MethodDef.isVarArgs         = NULL
     #MethodDef.isBridge          = NULL
     #MethodDef.isSynthetic       = NULL
 
-cdef struct JConstructorDef:
-    jclass clazz
-    jmethodID getName, getParameterTypes, getModifiers, isVarArgs #, isSynthetic
 cdef void init_ConstructorDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/reflect/Constructor')
     ConstructorDef.clazz = <jclass>NewGlobalRef(env, C)
     ConstructorDef.getName           = GetMethodID(env, C, b'getName',           b'()Ljava/lang/String;')
     ConstructorDef.getParameterTypes = GetMethodID(env, C, b'getParameterTypes', b'()[Ljava/lang/Class;')
+    ConstructorDef.getExceptionTypes = GetMethodID(env, C, b'getExceptionTypes', b'()[Ljava/lang/Class;')
+    ConstructorDef.getDeclaringClass = GetMethodID(env, C, b'getDeclaringClass', b'()Ljava/lang/Class;')
     ConstructorDef.getModifiers      = GetMethodID(env, C, b'getModifiers',      b'()I')
     ConstructorDef.isVarArgs         = GetMethodID(env, C, b'isVarArgs',         b'()Z')
     #ConstructorDef.isSynthetic       = GetMethodID(env, C, b'isSynthetic',       b'()Z')
-    # Parent: getDeclaringClass()
-    # Generics: getGenericParameterTypes(), getTypeParameters()
+    # Generics: getGenericParameterTypes(), getTypeParameters(), getGenericExceptionTypes()
     # Annotations: getDeclaredAnnotations(), getParameterAnnotations()
-    # Exceptions: getExceptionTypes(), getGenericExceptionTypes()
     DeleteLocalRef(env, C)
 cdef void dealloc_ConstructorDef(JNIEnv* env) nogil:
     if ConstructorDef.clazz is not NULL: DeleteGlobalRef(env, ConstructorDef.clazz)
     ConstructorDef.clazz             = NULL
     ConstructorDef.getName           = NULL
     ConstructorDef.getParameterTypes = NULL
+    ConstructorDef.getExceptionTypes = NULL
+    ConstructorDef.getDeclaringClass = NULL
     ConstructorDef.getModifiers      = NULL
     ConstructorDef.isVarArgs         = NULL
     #ConstructorDef.isSynthetic       = NULL
 
-cdef struct JRunnableDef:
-    jclass clazz
-    jmethodID run
 cdef void init_RunnableDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/Runnable')
     RunnableDef.clazz = <jclass>NewGlobalRef(env, C)
@@ -443,10 +398,6 @@ cdef void dealloc_RunnableDef(JNIEnv* env) nogil:
     RunnableDef.clazz = NULL
     RunnableDef.run   = NULL
 
-cdef struct JThreadDef:
-    jclass clazz
-    jmethodID currentThread # static
-    jmethodID getContextClassLoader, setContextClassLoader
 cdef void init_ThreadDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/Thread')
     ThreadDef.clazz = <jclass>NewGlobalRef(env, C)
@@ -461,19 +412,6 @@ cdef void dealloc_ThreadDef(JNIEnv* env) nogil:
     ThreadDef.getContextClassLoader = NULL
     ThreadDef.setContextClassLoader = NULL
 
-cdef JObjectDef      ObjectDef
-cdef JSystemDef      SystemDef
-cdef JClassLoaderDef ClassLoaderDef
-cdef JURLClassLoaderDef URLClassLoaderDef
-cdef JFileDef        FileDef
-cdef JURIDef         URIDef
-cdef JPackageDef     PackageDef
-cdef JClassDef       ClassDef
-cdef JFieldDef       FieldDef
-cdef JMethodDef      MethodDef
-cdef JConstructorDef ConstructorDef
-cdef JRunnableDef    RunnableDef
-cdef JThreadDef      ThreadDef
 cdef int init_def(JEnv env) except -1:
     with nogil:
         init_ObjectDef     (env.env)
@@ -502,8 +440,8 @@ cdef int dealloc_def(JEnv env) except -1:
         dealloc_RunnableDef   (env.env)
         dealloc_ThreadDef     (env.env)
     return 0
-JVM.add_early_init_hook(init_def)
-JVM.add_dealloc_hook(dealloc_def)
+jvm_add_init_hook(init_def, -10)
+jvm_add_dealloc_hook(dealloc_def, -10)
 
 
 ########## Basic actions that can be queued in the JVM thread ##########
@@ -511,33 +449,17 @@ JVM.add_dealloc_hook(dealloc_def)
 # useful eventually.
 cdef class DeleteGlobalRefAction(JVMAction):
     """Calls DeleteGlobalRef on the object"""
-    cdef jobject obj
-    @staticmethod
-    cdef DeleteGlobalRefAction create(jobject obj):
-        cdef DeleteGlobalRefAction action = DeleteGlobalRefAction()
-        action.obj = obj
-        return action
-    cpdef int run(self, JEnv env) except -1:
+    cpdef run(self, JEnv env):
         assert self.obj is not NULL
-        DeleteGlobalRef(env.env, self.obj)
+        env.DeleteGlobalRef(self.obj)
 cdef class RunnableAction(JVMAction):
     """Calls obj.run() with or without the GIL"""
-    cdef jobject obj
-    cdef bint withgil
-    @staticmethod
-    cdef RunnableAction create(jobject obj, bint withgil=False):
-        cdef RunnableAction action = RunnableAction()
-        action.obj = obj
-        action.withgil = withgil
-        return action
-    cpdef int run(self, JEnv env) except -1:
+    cpdef run(self, JEnv env):
         assert self.obj is not NULL
         env.CallVoidMethod(self.obj, RunnableDef.run, NULL, False)
 cdef class GCAction(JVMAction):
-    """Calls java.lang.System.gc()"""
-    @staticmethod
-    cdef GCAction create(): return GCAction()
-    cpdef int run(self, JEnv env) except -1:
+    """Calls java.lang.System.gc() and Python's gc.collect()"""
+    cpdef run(self, JEnv env):
         env.CallStaticVoidMethod(SystemDef.clazz, SystemDef.gc, NULL, False)
         import gc
         gc.collect()
@@ -547,71 +469,8 @@ cdef class GCAction(JVMAction):
 # Basic wrapper classes for jclass, jmethodID, jfieldID, and jobject
 cdef dict jclasses = None # dictionary of class name -> JClass
 
-cdef enum ClassType:
-    CT_INTERFACE  = 1,
-    CT_PRIMITIVE  = 2,
-    CT_ARRAY      = 3,
-    CT_ENUM       = 4,
-    #CT_ANNOTATION = 5,
-    
-cdef enum ClassMode:
-    CM_ANONYMOUS  = 1, # an anonymous class is a local class without a name
-    CM_LOCAL      = 2, # a class within a method/constructor
-    CM_MEMBER     = 3, # a class within a class, may be an inner class or a static nested class
-    
-cdef inline unicode protection_prefix(Modifiers mod):
-    """
-    Gets one of (empty string), _, or __ if the modifiers indicate public, protected, or
-    (package-)private.
-    """
-    if   mod & PUBLIC:    return ''
-    elif mod & PROTECTED: return '_'
-    else:                 return '__' # private OR package-private
-    
 cdef class JClass(object):
     """Wrapper around a jclass pointer along with several properties of the class"""
-    cdef JClassFuncs* funcs
-    cdef jclass clazz
-    cdef int identity # from System.identityHashCode
-    cdef readonly unicode name
-    cdef unicode simple_name
-    cdef ClassType type
-    cdef ClassMode mode
-    #cdef bint is_synthetic
-    cdef unicode package_name
-    cdef JClass enclosing_class
-    cdef JClass declaring_class # null for anonymous and local classes, enclosing class always works
-    cdef Modifiers modifiers # mask = PUBLIC | PRIVATE | PROTECTED | STATIC | ABSTRACT | STRICT (for interfaces)
-        # mask |= FINAL (for classes)
-    cdef JClass component_type # None for all classes except arrays
-    cdef JClass superclass   # None for base interfaces, primitive, and the Object type
-    cdef list interfaces     # list of JClass
-    cdef dict classes        # dict of attribute name -> JClass
-    cdef dict static_classes # dict of attribute name -> JClass
-    cdef list constructors   # list of JConstructor
-    cdef dict methods        # dict of attribute name -> list of JMethod
-    cdef dict static_methods # dict of attribute name -> list of JMethod
-    cdef dict fields         # dict of attribute name -> JField
-    cdef dict static_fields  # dict of attribute name -> JField
-
-    cdef inline unicode attr_name(self): return protection_prefix(self.modifiers) + self.simple_name
-    cdef inline unicode sig(self):
-        if self.is_primitive(): return unichr(self.funcs.sig)
-        return self.name if self.is_array() else ('L%s;' % self.name)
-    cdef inline bint is_interface(self):    return self.type == CT_INTERFACE
-    cdef inline bint is_primitive(self):    return self.type == CT_PRIMITIVE
-    cdef inline bint is_array(self):        return self.type == CT_ARRAY
-    cdef inline bint is_enum(self):         return self.type == CT_ENUM
-    cdef inline bint is_anonymous(self):    return self.mode == CM_ANONYMOUS
-    cdef inline bint is_local(self):        return self.mode == CM_LOCAL
-    cdef inline bint is_member(self):       return self.mode == CM_MEMBER # either a static nested or inner class
-    cdef inline bint is_nested(self):       return self.mode != 0
-    cdef inline Modifiers get_access(self): return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
-    cdef inline bint is_static(self):       return (self.modifiers & STATIC)   == STATIC
-    cdef inline bint is_final(self):        return (self.modifiers & FINAL)    == FINAL
-    cdef inline bint is_abstract(self):     return (self.modifiers & ABSTRACT) == ABSTRACT
-    cdef inline bint is_strict(self):       return (self.modifiers & STRICT)   == STRICT
-
     @staticmethod
     cdef JClass named(JEnv env, unicode name):
         """Gets or creates a unique JClass for the class name given."""
@@ -673,17 +532,17 @@ cdef class JClass(object):
             c.enclosing_class = env.CallClass(clazz, ClassDef.getEnclosingClass)
             c.declaring_class = env.CallClass(clazz, ClassDef.getDeclaringClass)
             if c.is_array(): c.component_type = env.CallClass(clazz, ClassDef.getComponentType)
-            c.interfaces = env.CallClasses(clazz, ClassDef.getInterfaces)
-            classes = env.CallClasses(clazz, ClassDef.getDeclaredClasses)
+            c.interfaces = call2list(env, clazz, ClassDef.getInterfaces, <obj2py>JClass.get)
+            classes = call2list(env, clazz, ClassDef.getDeclaredClasses, <obj2py>JClass.get)
             classes = [dc for dc in classes if dc.mode != CM_ANONYMOUS and dc.mode != CM_LOCAL]
             c.classes        = {dc.attr_name():dc for dc in classes if not dc.is_static()}
             c.static_classes = {dc.attr_name():dc for dc in classes if     dc.is_static()}
-            ctors = env.CallObjects(clazz, ClassDef.getDeclaredConstructors, <obj2py>JMethod.create_ctor)
+            ctors = call2list(env, clazz, ClassDef.getDeclaredConstructors, <obj2py>JMethod.create_ctor)
             c.constructors = ctors
-            methods = env.CallObjects(clazz, ClassDef.getDeclaredMethods, <obj2py>JMethod.create)
+            methods = call2list(env, clazz, ClassDef.getDeclaredMethods, <obj2py>JMethod.create)
             c.methods        = JMethod.group([m for m in methods if not m.is_static()])
             c.static_methods = JMethod.group([m for m in methods if     m.is_static()])
-            fields = env.CallObjects(clazz, ClassDef.getDeclaredFields, <obj2py>JField.create)
+            fields = call2list(env, clazz, ClassDef.getDeclaredFields, <obj2py>JField.create)
             c.fields         = {f.attr_name():f for f in fields if not f.is_static()}
             c.static_fields  = {f.attr_name():f for f in fields if     f.is_static()}
         except:
@@ -692,7 +551,7 @@ cdef class JClass(object):
         return c
 
     @staticmethod
-    cdef inline JClass create_primitive(JNIEnv* env, unicode cn, unicode name, JClassFuncs* funcs):
+    cdef JClass __create_primitive(JNIEnv* env, unicode cn, unicode name, JClassFuncs* funcs):
         """Creates a JClass object for a primitive type given its clazz, name, and functions."""
         # Should not raise errors here, so access functions directly instead of with JEnv wrappers
         cdef jclass clazz = FindClass(env, to_utf8j(cn)), clazz_prim
@@ -726,31 +585,9 @@ cdef class JClass(object):
         DeleteLocalRef(env, clazz_prim)
         return c
 
-    cdef inline int destroy(self) except -1:
-        # Make sure to remove cyclic references
-        self.enclosing_class = None
-        self.declaring_class = None
-        self.component_type = None
-        self.superclass = None
-        self.interfaces = None
-        self.classes = None
-        self.static_classes = None
-        self.constructors = None
-        self.methods = None
-        self.static_methods = None
-        self.fields = None
-        self.static_fields = None
-        
-        cdef JVM j
-        if self.clazz is not NULL:
-            j = jvm()
-            if j is not None:
-                if j.is_attached(): DeleteGlobalRef(j.env().env, self.clazz)
-                else: j.run_action(DeleteGlobalRefAction.create(self.clazz))
-            self.clazz = NULL
-        return 0
     def __dealloc__(self): self.destroy()
     def __hash__(self): return self.identity
+    def __repr__(self): return u'<jclass instance at %08x>'%self.identity
 
     # Comparisons for looking at the class heirarchy
     # if a < b then a is a subclass of b   (including interfaces)
@@ -768,40 +605,13 @@ cdef class JClass(object):
         if op == 4: return diff and env.IsAssignableFrom(c.clazz, self.clazz) # >
         if op == 5: return          env.IsAssignableFrom(c.clazz, self.clazz) # >=
         raise ValueError()
-    # These functions do the same as <= and == but are a bit more efficient since
-    # they take the JEnv and can be inlined.
-    cdef inline is_sub(self, JEnv env, JClass b): return env.IsAssignableFrom(self.clazz, b.clazz)
-    cdef inline is_same(self, JEnv env, JClass b): return env.IsSameObject(self.clazz, b.clazz)
-
-    def __repr__(self): return '<jclass instance at %08x>'%self.identity
 
 cdef class JMethod(object):
     """Wrapper around a jmethodID along with several properties of the method/constructor"""
-    cdef jmethodID id
-    cdef readonly unicode name
-    cdef Modifiers modifiers # mask = PUBLIC | PRIVATE | PROTECTED (for constructors)
-        # mask |= STATIC | FINAL | SYNCHRONIZED | NATIVE | ABSTRACT | STRICT (for methods)
-    cdef JClass return_type # None if it is a constructor
-    cdef list param_types # list of JClass
-    cdef bint is_var_args #, is_synthetic, is_bridge
-    cdef inline unicode attr_name(self): return protection_prefix(self.modifiers) + self.name
-    cdef inline unicode param_sig(self): return ''.join((<JClass>t).sig() for t in self.param_types)
-    cdef inline unicode return_sig(self): return 'V' if self.return_type is None else self.return_type.sig()
-    cdef inline unicode sig(self): return '(%s)%s' % (self.param_sig(), self.return_sig())
-    cdef inline Modifiers get_access(self): return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
-    cdef inline bint is_static(self):       return self.modifiers & STATIC
-    cdef inline bint is_final(self):        return self.modifiers & FINAL
-    cdef inline bint is_synchronized(self): return self.modifiers & SYNCHRONIZED
-    cdef inline bint is_native(self):       return self.modifiers & NATIVE
-    cdef inline bint is_abstract(self):     return self.modifiers & ABSTRACT
-    cdef inline bint is_strict(self):       return self.modifiers & STRICT
-
     @staticmethod
     cdef JMethod create(JEnv env, jobject method):
         """Creates a JMethod for the reflected Method object given. The ref is deleted."""
         cdef JMethod m = JMethod()
-        cdef jobject return_type
-        cdef jobjectArray param_types
         try:
             m.id = env.FromReflectedMethod(method)
             m.name = env.CallString(method, MethodDef.getName)
@@ -809,27 +619,23 @@ cdef class JMethod(object):
             m.is_var_args = env.CallBoolean(method, MethodDef.isVarArgs)
             #m.is_synthetic = env.CallBoolean(method, MethodDef.isSynthetic)
             #m.is_bridge = env.CallBoolean(method, MethodDef.isBridge)
-            return_type = env.CallObject(method, MethodDef.getReturnType)
-            param_types = env.CallObject(method, MethodDef.getParameterTypes)
+            m.return_type = env.CallClass(method, MethodDef.getReturnType)
+            m.param_types = call2list(env, method, MethodDef.getParameterTypes, <obj2py>JClass.get)
         finally: env.DeleteRef(method)
-        m.return_type = JClass.get(env, return_type)
-        m.param_types = env.objs2list(param_types, <obj2py>JClass.get)
         return m
     @staticmethod
     cdef JMethod create_ctor(JEnv env, jobject ctor):
         """Creates a JMethod for the reflected Constructor object given. The ref is deleted."""
         cdef JMethod c = JMethod()
-        cdef jobjectArray param_types
         try:
             c.id = env.FromReflectedMethod(ctor)
             c.name = env.CallString(ctor, ConstructorDef.getName)
             c.modifiers = <Modifiers>env.CallInt(ctor, ConstructorDef.getModifiers)
             c.is_var_args = env.CallBoolean(ctor, ConstructorDef.isVarArgs)
             #c.is_synthetic = env.CallBoolean(ctor, ConstructorDef.isSynthetic)
-            param_types = env.CallObject(ctor, ConstructorDef.getParameterTypes)
+            c.return_type = None
+            c.param_types = call2list(env, ctor, ConstructorDef.getParameterTypes, <obj2py>JClass.get)
         finally: env.DeleteRef(ctor)
-        c.return_type = None
-        c.param_types = env.objs2list(param_types, <obj2py>JClass.get)
         return c
     @staticmethod
     cdef dict group(list methods):
@@ -841,82 +647,52 @@ cdef class JMethod(object):
             grp = out.setdefault(m.attr_name(), [])
             grp.append(m)
         return out
-    def __repr__(self): return '<jmethodID instance at %s>'%str_ptr(self.id)
+    def __repr__(self): return u'<jmethodID instance at %s>'%str_ptr(self.id)
     def __dealloc__(self): self.id = NULL; self.return_type = None; self.param_types = None
 
 cdef class JField(object):
     """Wrapper around a jfieldID pointer along with several properties of the field"""
-    cdef jfieldID id
-    cdef readonly unicode name
-    cdef Modifiers modifiers # mask = PUBLIC | PRIVATE | PROTECTED | STATIC | FINAL | VOLATILE | TRANSIENT
-    #cdef bint is_synthetic
-    cdef JClass type
-    cdef inline unicode attr_name(self): return protection_prefix(self.modifiers) + self.name
-    cdef inline Modifiers get_access(self): return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
-    cdef inline bint is_static(self):       return self.modifiers & STATIC
-    cdef inline bint is_final(self):        return self.modifiers & FINAL
-    cdef inline bint is_volatile(self):     return self.modifiers & VOLATILE
-    cdef inline bint is_transient(self):    return self.modifiers & TRANSIENT
-
     @staticmethod
     cdef JField create(JEnv env, jobject field):
         """Creates a JField for the reflected Field object given. The ref is deleted."""
         cdef JField f = JField()
-        cdef jobject type
         try:
             f.id = env.FromReflectedField(field)
             f.name = env.CallString(field, FieldDef.getName)
             f.modifiers = <Modifiers>env.CallInt(field, FieldDef.getModifiers)
             #f.is_synthetic = env.CallBoolean(field, FieldDef.isSynthetic)
-            type = env.CallObject(field, FieldDef.getType)
+            f.type = env.CallClass(field, FieldDef.getType)
         finally: env.DeleteRef(field)
-        f.type = JClass.get(env, type)
         return f
-    def __repr__(self): return '<jfieldID instance at %s>'%str_ptr(self.id)
+    def __repr__(self): return u'<jfieldID instance at %s>'%str_ptr(self.id)
     def __dealloc__(self): self.id = NULL; self.type = None
 
 cdef class JObject(object):
-    cdef jobject obj
-    @staticmethod
-    cdef JObject create(JEnv env, jobject obj):
-        cdef JObject o = JObject()
-        o.obj = env.NewGlobalRef(obj)
-        env.DeleteRef(obj)
-        return o
-    @staticmethod
-    cdef JObject wrap(JEnv env, jobject obj):
-        cdef JObject o = JObject()
-        o.obj = obj
-        return o
-    cdef inline int destroy(self) except -1:
-        cdef JVM j
+    def destroy(self):
         if self.obj is not NULL:
-            j = jvm()
-            if j is not None:
-                # TODO: make sure this JVM is the same JVM that created the jobject
-                if j.is_attached(): DeleteGlobalRef(j.env().env, self.obj)
-                else: j.run_action(DeleteGlobalRefAction.create(self.obj))
+            delete_global_ref(self.obj)
             self.obj = NULL
-        return 0
+    def __destroy_local(self):
+        if self.obj is not NULL:
+            # local refs should only be used and destroyed on a single thread so there is no need
+            # to do the special handling like was done for global refs
+            jenv().DeleteLocalRef(self.obj)
+            self.obj = NULL
     def __dealloc__(self): self.destroy()
-    cdef inline jint identity(self) except? -1:
-        cdef jvalue val
-        val.l = self.obj
-        return jenv().CallStaticInt(SystemDef.clazz, SystemDef.identityHashCode, &val)
     def __hash__(self): self.identity()
-    def __repr__(self): return '<jobject instance at %08x>'%self.identity()
+    def __repr__(self): return u'<jobject instance at %08x>'%self.identity()
 
 cdef int init_jclasses(JEnv env) except -1:
     global jclasses; jclasses = {
-        'void'   : JClass.create_primitive(env.env, 'java/lang/Void',      'void',    &jcf_void),
-        'boolean': JClass.create_primitive(env.env, 'java/lang/Boolean',   'boolean', &jcf_boolean),
-        'byte'   : JClass.create_primitive(env.env, 'java/lang/Byte',      'byte',    &jcf_byte),
-        'char'   : JClass.create_primitive(env.env, 'java/lang/Character', 'char',    &jcf_char),
-        'short'  : JClass.create_primitive(env.env, 'java/lang/Short',     'short',   &jcf_short),
-        'int'    : JClass.create_primitive(env.env, 'java/lang/Integer',   'int',     &jcf_int),
-        'long'   : JClass.create_primitive(env.env, 'java/lang/Long',      'long',    &jcf_long),
-        'float'  : JClass.create_primitive(env.env, 'java/lang/Float',     'float',   &jcf_float),
-        'double' : JClass.create_primitive(env.env, 'java/lang/Double',    'double',  &jcf_double),
+        u'void'   : JClass.__create_primitive(env.env, u'java/lang/Void',      u'void',    &jcf_void),
+        u'boolean': JClass.__create_primitive(env.env, u'java/lang/Boolean',   u'boolean', &jcf_boolean),
+        u'byte'   : JClass.__create_primitive(env.env, u'java/lang/Byte',      u'byte',    &jcf_byte),
+        u'char'   : JClass.__create_primitive(env.env, u'java/lang/Character', u'char',    &jcf_char),
+        u'short'  : JClass.__create_primitive(env.env, u'java/lang/Short',     u'short',   &jcf_short),
+        u'int'    : JClass.__create_primitive(env.env, u'java/lang/Integer',   u'int',     &jcf_int),
+        u'long'   : JClass.__create_primitive(env.env, u'java/lang/Long',      u'long',    &jcf_long),
+        u'float'  : JClass.__create_primitive(env.env, u'java/lang/Float',     u'float',   &jcf_float),
+        u'double' : JClass.__create_primitive(env.env, u'java/lang/Double',    u'double',  &jcf_double),
     }
     return 0
 cdef int dealloc_jclasses(JEnv env) except -1:
@@ -927,49 +703,14 @@ cdef int dealloc_jclasses(JEnv env) except -1:
     c = None
     jclasses = None
     return 0
-JVM.add_early_init_hook(init_jclasses)
-JVM.add_dealloc_hook(dealloc_jclasses)
+jvm_add_init_hook(init_jclasses, -8)
+jvm_add_dealloc_hook(dealloc_jclasses, -8)
 
 
 ########## Type Boxing Support ##########
 cdef jobject Boolean_TRUE, Boolean_FALSE
 cdef jclass box_classes[8]
 cdef jmethodID box_ctors[8]
-
-#cdef inline jobject box_boolean(JEnv env, jboolean x) except NULL:
-#    cdef jvalue val
-#    val.z = x
-#    return env.NewObject(box_classes[0], box_ctors[0], &val)
-cdef inline jobject box_boolean(JEnv env, jboolean x) except NULL:
-    return env.NewLocalRef(Boolean_TRUE if x == JNI_TRUE else Boolean_FALSE)
-cdef inline jobject box_byte(JEnv env, jbyte x) except NULL:
-    cdef jvalue val
-    val.b = x
-    return env.NewObject(box_classes[1], box_ctors[1], &val)
-cdef inline jobject box_char(JEnv env, jchar x) except NULL:
-    cdef jvalue val
-    val.c = x
-    return env.NewObject(box_classes[2], box_ctors[2], &val)
-cdef inline jobject box_short(JEnv env, jshort x) except NULL:
-    cdef jvalue val
-    val.s = x
-    return env.NewObject(box_classes[3], box_ctors[3], &val)
-cdef inline jobject box_int(JEnv env, jint x) except NULL:
-    cdef jvalue val
-    val.i = x
-    return env.NewObject(box_classes[5], box_ctors[5], &val)
-cdef inline jobject box_long(JEnv env, jlong x) except NULL:
-    cdef jvalue val
-    val.j = x
-    return env.NewObject(box_classes[5], box_ctors[5], &val)
-cdef inline jobject box_float(JEnv env, jfloat x) except NULL:
-    cdef jvalue val
-    val.f = x
-    return env.NewObject(box_classes[6], box_ctors[6], &val)
-cdef inline jobject box_double(JEnv env, jdouble x) except NULL:
-    cdef jvalue val
-    val.d = x
-    return env.NewObject(box_classes[7], box_ctors[7], &val)
 cdef int init_boxes(JEnv env) except -1:
     global Boolean_TRUE, Boolean_FALSE
     cdef jclass C
@@ -1006,5 +747,5 @@ cdef int dealloc_boxes(JEnv env) except -1:
             box_classes[i] = NULL
             box_ctors[i]   = NULL
     return 0
-JVM.add_early_init_hook(init_boxes)
-JVM.add_dealloc_hook(dealloc_boxes)
+jvm_add_init_hook(init_boxes, -7)
+jvm_add_dealloc_hook(dealloc_boxes, -7)

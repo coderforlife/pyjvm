@@ -30,7 +30,18 @@ Internal classes:
     JArray          - base class for all Java arrays
     JPrimitiveArray - base class for all primitive Java arrays
     JObjectArray    - base class for all reference Java arrays
+    JPrimArrayPointer - a context manager used to pin a primitive array
 
+Internal functions:
+    get_jpad - gets the JPrimArrayDef for a  type for use with internal JPrimitiveArray functions
+
+Provides the conversions:
+    unicode     -> char[]
+    bytes       -> byte[]
+    bytearray   -> byte[]
+    array.array -> primitive array
+    buffer/memoryview -> primitive array
+    
 FUTURE:
     support critical array access
     support buffer protocol (consumer and exporter) for multi-dimensional primitive arrays
@@ -38,8 +49,20 @@ FUTURE:
     use PyBuffer_SizeFromFormat instead of struct.calcsize
     support java.util.Arrays JDK 8 additions:
         parallelSort, parallelPrefix, parallelSetAll, setAll, spliterator, stream
+    additional conversions:
+        bytes             -> ByteBuffer
+        bytearray         -> ByteBuffer
+        array.array       -> <type>Buffer
+        buffer/memoryview -> <type>Buffer
+        list
+        tuple
 """
 
+from __future__ import absolute_import
+
+include "version.pxi"
+
+from libc.stdlib cimport malloc, free
 from libc.string cimport memchr, memset, strchr
 
 from cpython.object  cimport PyTypeObject
@@ -47,18 +70,44 @@ from cpython.number  cimport PyNumber_Index
 from cpython.ref     cimport Py_INCREF
 from cpython.slice   cimport PySlice_Check
 from cpython.list    cimport PyList_New, PyList_SET_ITEM
-from cpython.unicode cimport PyUnicode_Check, PyUnicode_AsASCIIString, PyUnicode_DecodeUTF16, PyUnicode_AsUTF16String
 from cpython.buffer  cimport PyObject_CheckBuffer, PyObject_GetBuffer, PyBuffer_Release
 from cpython.buffer  cimport PyBUF_WRITABLE, PyBUF_INDIRECT, PyBUF_SIMPLE, PyBUF_FORMAT, PyBUF_ND
-from cpython.bytes   cimport PyBytes_Check, PyBytes_FromStringAndSize, PyBytes_AS_STRING
+from cpython.unicode cimport PyUnicode_Check, PyUnicode_AsASCIIString, PyUnicode_DecodeUTF16
+from cpython.bytes   cimport PyBytes_Check, PyBytes_GET_SIZE, PyBytes_FromStringAndSize, PyBytes_AS_STRING
 cdef extern from "Python.h":
     cdef bint PyByteArray_Check(object o)
     cdef bytearray PyByteArray_FromStringAndSize(const char *bytes, Py_ssize_t size)
     cdef char *PyByteArray_AS_STRING(bytearray)
     cdef Py_ssize_t PyByteArray_GET_SIZE(bytearray)
+
+IF PY_VERSION < PY_VERSION_3_3:
+    from cpython.unicode cimport PyUnicode_AS_UNICODE
+ELSE:
+    cdef extern from "Python.h":
+        cdef enum:
+            PyUnicode_4BYTE_KIND
+        cdef int PyUnicode_KIND(object)
+        cdef void* PyUnicode_DATA(object)
+
+        
 from cpython.array cimport array
 cdef extern from *:
     array newarrayobject(type type, Py_ssize_t size, void *descr)
+
+
+from .utils cimport PyThreadState, PyEval_SaveThread, PyEval_RestoreThread
+from .unicode cimport unichr, n_chars_fit, addl_chars_needed, get_direct_copy_ptr, copy_uni_to_ucs2
+
+from .jni cimport jclass, jobject, JNIEnv, jmethodID, jarray, jobjectArray, jvalue, jsize
+from .jni cimport jprimitive, jboolean, jbyte, jchar, jshort, jint, jlong, jfloat, jdouble
+from .jni cimport JNI_TRUE, JNI_FALSE, JNI_ABORT
+
+from .core cimport jvm_add_init_hook, jvm_add_dealloc_hook
+from .core cimport JClass, JObject, JEnv, jenv, SystemDef, ObjectDef
+from .core cimport py2boolean, py2byte, py2char, py2short, py2int, py2long, py2float, py2double
+from .convert cimport object2py, py2object
+from .convert cimport P2JConvert, P2JQuality, FAIL, GOOD, GREAT, PERFECT, reg_conv_cy
+from .objects cimport get_java_class, get_object_class, get_class, get_object, get_identity
 
 
 cdef class JArray(object):
@@ -66,69 +115,56 @@ cdef class JArray(object):
     The base type for Java arrays. Contains the Java references and the length of the array, but
     doesn't do much else.
     """
-    cdef readonly JObject __object__
-    cdef readonly jsize length
-    cdef jarray arr # a simple copy of the reference actually stored in __object__
-
-    cdef inline object wrap(self, JEnv env, JObject obj):
-        self.__object__ = obj
-        self.arr = obj.obj
-        self.length = env.GetArrayLength(self.arr)
-
-    @staticmethod
-    cdef inline jsize check_index(object index, jsize n) except -1:
-        """Checks, and converts, an index. Adjusts it for things like negative indices."""
-        cdef jsize i = index
-        if i < 0: i += n
-        if i < 0 or i >= n: raise IndexError()
-        return i
-    @staticmethod
-    cdef inline tuple check_slice(object start, object stop, object step, jsize n):
-        """Checks, and converts, a slice. Adjusts it for things like negative indices."""
-        if step is not None and step != 1: raise ValueError('only slices with a step of 1 (default) are supported')
-        cdef jsize i = 0 if start is None else start
-        cdef jsize j = n if stop is None else stop
-        if i < 0:
-            i += n
-            if i < 0: i = 0
-        elif i > n: i = n
-
-        if j < 0: j += n
-        elif j > n: j = n
-
-        if i > j: raise IndexError('%d > %d' % (i,j))
-        return i,j
-    @staticmethod
-    cdef inline withgil(Py_ssize_t n):
-        """Releasing the GIL takes 100-200ns, so only release it for larger operations"""
-        # memcpy can probably copy about 10-20 bytes/ns
-        # Doing any operations probably costs about 10-40 ns/element
-        # so when called with a copy command, divide n by (100/itemsize, 128/itemsize so a power of two), otherwise use the big-O n
-        return n < 1024
-
-    @staticmethod
-    cdef int arraycopy(JEnv env, jarray src, jint srcPos, jarray dest, jint destPos, jint length) except -1:
-        cdef jvalue[5] val
-        val[0].l = src; val[1].i = srcPos; val[2].l = src; val[3].i = destPos; val[4].i = length
-        env.CallStaticVoidMethod(SystemDef.clazz, SystemDef.arraycopy, val, JArray.withgil(length*16))
-        return 0
-
     def __len__(self): return self.length
 
     # Forward clone method (which is inherited as protected, but is actually public)
-    def clone(self): return jenv().CallObjectMethod(self.arr, ObjectDef.clone, NULL, JArray.withgil(self.length//4))
+    def clone(self): return jenv().CallObjectMethod(self.arr, ObjectDef.clone, NULL, withgil(self.length//4))
 
     # MutableSequence methods that change the size of the array raise errors
-    def __delitem__(self, i): raise TypeError('Java arrays cannot change size')
-    def __iadd__(self, vals): raise TypeError('Java arrays cannot change size')
-    def __imul__(self, vals): raise TypeError('Java arrays cannot change size')
-    def insert(self, i, val): raise TypeError('Java arrays cannot change size')
-    def append(self, val): raise TypeError('Java arrays cannot change size')
-    def extend(self, itr): raise TypeError('Java arrays cannot change size')
-    def remove(self, val): raise TypeError('Java arrays cannot change size')
-    def pop(self, i=None): raise TypeError('Java arrays cannot change size')
+    def __delitem__(self, i): raise TypeError(u'Java arrays cannot change size')
+    def __iadd__(self, vals): raise TypeError(u'Java arrays cannot change size')
+    def __imul__(self, vals): raise TypeError(u'Java arrays cannot change size')
+    def insert(self, i, val): raise TypeError(u'Java arrays cannot change size')
+    def append(self, val): raise TypeError(u'Java arrays cannot change size')
+    def extend(self, itr): raise TypeError(u'Java arrays cannot change size')
+    def remove(self, val): raise TypeError(u'Java arrays cannot change size')
+    def pop(self, i=None): raise TypeError(u'Java arrays cannot change size')
 
+cdef inline jsize check_index(object index, jsize n) except -1:
+    """Checks, and converts, an index. Adjusts it for things like negative indices."""
+    cdef jsize i = index
+    if i < 0: i += n
+    if i < 0 or i >= n: raise IndexError()
+    return i
+cdef inline tuple check_slice(object start, object stop, object step, jsize n):
+    """Checks, and converts, a slice. Adjusts it for things like negative indices."""
+    if step is not None and step != 1: raise ValueError(u'only slices with a step of 1 (default) are supported')
+    cdef jsize i = 0 if start is None else start
+    cdef jsize j = n if stop is None else stop
+    if i < 0:
+        i += n
+        if i < 0: i = 0
+    elif i > n: i = n
 
+    if j < 0: j += n
+    elif j > n: j = n
+
+    if i > j: raise IndexError(u'%d > %d' % (i,j))
+    return i,j
+cdef inline withgil(Py_ssize_t n):
+    """Releasing the GIL takes 100-200ns, so only release it for larger operations"""
+    # memcpy can probably copy about 10-20 bytes/ns
+    # Doing any operations probably costs about 10-40 ns/element
+    # so when called with a copy command, divide n by (100/itemsize, 128/itemsize so a power of two), otherwise use the big-O n
+    return n < 1024
+
+cdef inline int arraycopy(JEnv env, jarray src, jint srcPos, jarray dest, jint destPos, jint length) except -1:
+    cdef jvalue[5] val
+    val[0].l = src; val[1].i = srcPos; val[2].l = src; val[3].i = destPos; val[4].i = length
+    env.CallStaticVoidMethod(SystemDef.clazz, SystemDef.arraycopy, val, withgil(length*16))
+    return 0
+    
+    
 ########## Primitive Types Python Correlates ##########
 cdef bytes buffer_formats_bool = b'?'
 cdef bytes buffer_formats_char = b'cuw'
@@ -143,7 +179,7 @@ ELSE:
     cdef bytes array_typecodes_int = b'bhil'
 cdef bytes array_typecodes_fp = b'fd'
 
- # Lists loaded with size-0 array.arrays of relevant typecodes so we can use newarrayobject directly
+# Lists loaded with size-0 array.arrays of relevant typecodes so we can use newarrayobject directly
 cdef list array_templates_bool
 cdef list array_templates_char
 cdef list array_templates_int
@@ -183,7 +219,7 @@ cdef inline bint contains(jprimitive* arr, jsize n, x) except -1:
     """Finds if x is contained in arr"""
     cdef jprimitive val
     obj2primitive[jprimitive](x, &val)
-    cdef PyThreadState* gilstate = NULL if JArray.withgil(n*sizeof(jprimitive)//64) else PyEval_SaveThread()
+    cdef PyThreadState* gilstate = NULL if withgil(n*sizeof(jprimitive)//64) else PyEval_SaveThread()
     cdef bint out = find[jprimitive](arr, n, val) != -1
     if gilstate is not NULL: PyEval_RestoreThread(gilstate)
     return out
@@ -192,10 +228,10 @@ cdef inline jsize index(jprimitive* arr, jsize start, jsize stop, x) except -1:
     cdef jprimitive val
     obj2primitive[jprimitive](x, &val)
     cdef jsize n = stop-start
-    cdef PyThreadState* gilstate = NULL if JArray.withgil(n*sizeof(jprimitive)//64) else PyEval_SaveThread()
+    cdef PyThreadState* gilstate = NULL if withgil(n*sizeof(jprimitive)//64) else PyEval_SaveThread()
     cdef jsize i = find[jprimitive](arr+start, n, val)
     if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-    if i == -1: raise ValueError('%s is not in array'%x)
+    if i == -1: raise ValueError(u'%s is not in array'%x)
     return i+start
 cdef inline jsize count(jprimitive* arr, jsize n, x) except -1:
     """Count occurences of x in the array"""
@@ -204,7 +240,7 @@ cdef inline jsize count(jprimitive* arr, jsize n, x) except -1:
     cdef jprimitive* buf = arr
     cdef jprimitive* end
     cdef jsize i, count = 0
-    cdef PyThreadState* gilstate = NULL if JArray.withgil(n*sizeof(jprimitive)//64) else PyEval_SaveThread()
+    cdef PyThreadState* gilstate = NULL if withgil(n*sizeof(jprimitive)//64) else PyEval_SaveThread()
     if jprimitive == jbyte or jprimitive == jboolean:
         end = buf+n
         while n > 0:
@@ -220,7 +256,7 @@ cdef inline int reverse(jprimitive* arr, jsize n) except -1:
     """Reverse the contents of the array"""
     cdef jsize i = 0, j = n - 1
     cdef jprimitive t
-    cdef PyThreadState* gilstate = NULL if JArray.withgil(n*sizeof(jprimitive)//64) else PyEval_SaveThread()
+    cdef PyThreadState* gilstate = NULL if withgil(n*sizeof(jprimitive)//64) else PyEval_SaveThread()
     while i < j:
         t = arr[i]; arr[i] = arr[j]; arr[j] = t
         i += 1; j -= 1
@@ -231,7 +267,7 @@ cdef inline int fill(jprimitive* arr, jsize start, jsize stop, x) except -1:
     cdef jsize n = stop-start
     cdef jprimitive val
     obj2primitive[jprimitive](x, &val)
-    cdef PyThreadState* gilstate = NULL if JArray.withgil(n*sizeof(jprimitive)//128) else PyEval_SaveThread()
+    cdef PyThreadState* gilstate = NULL if withgil(n*sizeof(jprimitive)//128) else PyEval_SaveThread()
     if jprimitive == jbyte or jprimitive == jboolean:
         memset(arr+start, val, n)
     else:
@@ -257,78 +293,37 @@ cdef inline int setseq(jprimitive* arr, seq, jsize off) except -1:
     for i,x in enumerate(seq, off): obj2primitive(x, arr+i)
     return 0
 
-IF PY_VERSION >= PY_VERSION_3_3 or PY_UNICODE_WIDE:
-    cdef void set_char_array_from_ucs4(const PyUCS4* src, jsize n, Py_UCS2* dst) nogil:
-        cdef PyUCS4 ch
-        cdef const PyUCS4* end = src + n
-        while src < end:
-            ch = src[0]; src += 1
-            if ch >= 0x10000:
-                dst[0] = 0xD800 | ((ch >> 10) & 0x3FF)
-                dst[1] = 0xDC00 | (ch & 0x3FF)
-                dst += 2
-            else: dst[0] = ch; dst += 1
-    cdef int copy_char_array_from_ucs4(JEnv env, const void* src, Py_ssize_t src_off, Py_ssize_t len,
-                                        JPrimitiveArray dst, jsize dst_off, jsize n_elems) except -1:
-        cdef const PyUCS4* s = (<const PyUCS4*>src)+src_off
-        cdef const PyUCS4* end = (<const PyUCS4*>src)+len
-        cdef jsize n_src = 0, n_dst = 0
-        while s < end and n_dst < n_elems: n_dst += s[0] >= 0x10000; n_dst += 1; n_src += 1; s += 1
-        if n_dst < n_elems: raise ValueError('not enough elements in source unicode')
-        if n_dst > n_elems: raise ValueError('cannot fit source unicode data into this array due to surrogate pairs')
-        cdef JPrimArrayPointer ptr = JPrimArrayPointer(env, dst, readonly=False)
-        set_char_array_from_ucs4((<const PyUCS4*>src)+src_off, n_src, (<Py_UCS2*>ptr.ptr)+dst_off)
-        return 0
-    cdef inline jsize __get_addl_chars_needed(const PyUCS4* s, Py_ssize_t n) except -1:
-        cdef const PyUCS4* end = s + n
-        n = 0
-        while s < end: n += s[0] >= 0x10000; s += 1
-        if sizeof(Py_ssize_t) > sizeof(jsize) and n > 0x7FFFFFFF: raise OverflowError()
-        return <jsize>n
-IF PY_VERSION >= PY_VERSION_3_3:
-    cdef inline Py_ssize_t get_unicode_len(unicode uni): return PyUnicode_GET_LENGTH(uni)
-ELSE:
-    cdef inline Py_ssize_t get_unicode_len(unicode uni): return PyUnicode_GET_SIZE(uni)
-cdef inline jsize get_addl_chars_needed(unicode uni, jsize i, jsize n) except -1:
-    """Counts the number of surrogate pairs required to encode the unicode string"""
-    IF PY_VERSION >= PY_VERSION_3_3:
-        if PyUnicode_KIND(uni) == PyUnicode_4BYTE_KIND:
-            return __get_addl_chars_needed((<const PyUCS4*>PyUnicode_DATA(uni))+i, n)
-        else: return 0
-    ELIF PY_UNICODE_WIDE:
-        return __get_addl_chars_needed((<const PyUCS4*>PyUnicode_AS_UNICODE(uni))+i, n)
-    ELSE: return 0
-
-cdef int set_char_array(JEnv env, unicode src, Py_ssize_t src_i, JPrimitiveArray dst, jsize dst_i, jsize n) except -1:
-    """
-    Sets char array data from a unicode string. This tries to be as optimal as possible with
-    copying of data. n is the number of characters from src, might need more than n elements in dst
-    if src is a unicode string in UCS4 encoding.
-    """
+# And a few utilities to deal with unicode/char-arrays
+cdef inline int copy_uni_to_char_array(unicode src, jsize src_i, jsize n, JPrimitiveArray dst, jsize dst_i) except -1:
+    """Copy n characters, starting at src_i, from src to dst, starting at dst_i."""
+    cdef jchar* p = <jchar*>get_direct_copy_ptr(src)
     cdef JPrimArrayPointer ptr
-    IF PY_VERSION >= PY_VERSION_3_3:
-        kind = PyUnicode_KIND(src)
-        if kind == PyUnicode_4BYTE_KIND:
-            ptr = JPrimArrayPointer(env, dst, readonly=False)
-            set_char_array_from_ucs4((<PyUCS4*>PyUnicode_DATA(src))+src_i, n, (<Py_UCS2*>ptr.ptr)+dst_i)
-        elif kind == PyUnicode_1BYTE_KIND:
-            ptr = JPrimArrayPointer(env, dst, readonly=False)
-            widen_unicode[Py_UCS1,Py_UCS2]((<Py_UCS1*>PyUnicode_DATA(src))+src_i, n, (<Py_UCS2*>ptr.ptr)+dst_i)
-        else: # kind == PyUnicode_2BYTE_KIND
-            dst.p.set(env, dst.arr, dst_i, n, (<Py_UCS2*>PyUnicode_DATA(src))+src_i)
-    ELIF PY_UNICODE_WIDE:
-        ptr = JPrimArrayPointer(env, dst, readonly=False)
-        set_char_array_from_ucs4((<PyUCS4*>PyUnicode_AS_UNICODE(src))+src_i, n, (<Py_UCS2*>ptr.ptr)+dst_i)
-    ELSE:
-        dst.p.set(env, dst.arr, dst_i, n, PyUnicode_AS_UNICODE(src)+src_i)
+    if p is not NULL: dst.p.set(jenv(), dst.arr, dst_i, n, p+src_i)
+    else:
+        ptr = JPrimArrayPointer(jenv(), dst, readonly=False)
+        copy_uni_to_ucs2(src, src_i, n, ptr.ptr, dst_i)
+    return 0
+cdef inline int copyfrom_uni_to_char_array(unicode src, jsize src_i, jsize src_n,
+                                           JPrimitiveArray dst, jsize dst_i, jsize dst_n) except -1:
+    """
+    Copy src_n characters, starting at src_i, from src to dst, starting at dst_i, which has dst_n
+    room. If the source has less characters (after considering surrogate pairs) than the
+    destination or cannot be aligned correctly, and exception is raised. The source can be longer
+    than the destination in which case only the beginning of the source is copied.
+    """
+    cdef Py_ssize_t n = n_chars_fit(src, src_i, src_n, dst_n)
+    cdef Py_ssize_t n2 = n + addl_chars_needed(src, src_i, n)
+    if n2 < dst_n: raise ValueError(u'not enough elements in source unicode')
+    if n2 > dst_n: raise ValueError(u'cannot fit source unicode data into this array due to surrogate pairs')
+    copy_uni_to_char_array(src, src_i, n, dst, dst_i)
     return 0
 
 
 ########### Group functions by primitive type ##########
 # JEnv function definitions
-#ctypedef jarray (*NewPrimArray)(JEnv env, jsize length) except NULL
+ctypedef jarray (*NewPrimArray)(JEnv env, jsize length) except NULL
 ctypedef void *(*GetPrimArrayElements)(JEnv env, jarray array, jboolean *isCopy, jsize len) except NULL
-ctypedef int (*ReleasePrimArrayElements)(JEnv env, jarray array, void *elems, jint mode) except -1
+#ctypedef void (*ReleasePrimArrayElements)(JEnv env, jarray array, void *elems, jint mode)
 ctypedef int (*GetPrimArrayRegion)(JEnv env, jarray array, jsize start, jsize len, void *buf) except -1
 ctypedef int (*SetPrimArrayRegion)(JEnv env, jarray array, jsize start, jsize len, const void *buf) except -1
 # Python function definitions
@@ -380,15 +375,12 @@ cdef struct JPrimArrayDef:
 
 # Would prefer to be able to use PyBuffer_SizeFromFormat, but that method is not implemented
 # So instead, we hard-code the boolean and char values and use the struct module for the rest
-#cdef inline int get_buffer_format_by_size(jsize itemsize, bytes formats, char* out) except -1:
-#    cdef bytes f, F = next((f for f in formats if PyBuffer_SizeFromFormat(f) == itemsize), None)
-#    if F is None: F = next((b'='+f for f in formats if PyBuffer_SizeFromFormat(b'='+f) == itemsize), None)
-#    if F is None: F = b'%dB'%itemsize # fallback
-#    out[0] = F[0]; out[1] = F[1] if len(F) > 1 else 0; out[2] = 0
+# Using it would change calcsize to PyBuffer_SizeFromFormat and uncomment two lines in
+# create_JPAD while removing the lines after them.
 cdef inline int get_buffer_format_by_size(jsize itemsize, bytes formats, char* out) except -1:
     from struct import calcsize
-    cdef bytes f, F = next((f for f in formats if calcsize(f) == itemsize), None)
-    if F is None: F = next((b'='+f for f in formats if calcsize(b'='+f) == itemsize), None)
+    cdef bytes f, F = next((bytes((f,)) for f in formats if calcsize(chr(f)) == itemsize), None)
+    if F is None: F = next((b'='+bytes((f,)) for f in formats if calcsize('='+chr(f)) == itemsize), None)
     if F is None: F = b'%dB'%itemsize # fallback
     out[0] = F[0]; out[1] = F[1] if len(F) > 1 else 0; out[2] = 0
 cdef inline void* get_array_descr_by_size(jsize itemsize, list templates) except? NULL:
@@ -414,12 +406,12 @@ cdef int create_JPAD(JEnv env, JPrimArrayDef* x, jprimitive p, PrimitiveType typ
         x[0].array_descr = get_array_descr_by_size(sizeof(jprimitive), array_templates_char)
         x[0].array_typecodes = array_typecodes_char
     elif type == PT_Integral:
-        get_buffer_format_by_size(sizeof(jprimitive), buffer_formats_int,  x[0].buffer_format)
+        get_buffer_format_by_size(sizeof(jprimitive), buffer_formats_int, x[0].buffer_format)
         x[0].buffer_formats = buffer_formats_int
         x[0].array_descr = get_array_descr_by_size(sizeof(jprimitive), array_templates_int)
         x[0].array_typecodes = array_typecodes_int
     elif type == PT_FloatingPoint:
-        get_buffer_format_by_size(sizeof(jprimitive), buffer_formats_fp,   x[0].buffer_format)
+        get_buffer_format_by_size(sizeof(jprimitive), buffer_formats_fp, x[0].buffer_format)
         x[0].buffer_formats = buffer_formats_fp
         x[0].array_descr = get_array_descr_by_size(sizeof(jprimitive), array_templates_fp)
         x[0].array_typecodes = array_typecodes_fp
@@ -447,16 +439,27 @@ cdef int create_JPAD(JEnv env, JPrimArrayDef* x, jprimitive p, PrimitiveType typ
         x[0].binarySearch = NULL
         x[0].binarySearch_range = NULL
     else:
-        x[0].sort         = env.GetStaticMethodID(Arrays, 'sort', '([%s)V'%u_sig)
-        x[0].sort_range   = env.GetStaticMethodID(Arrays, 'sort', '([%sII)V'%u_sig)
-        x[0].binarySearch = env.GetStaticMethodID(Arrays, 'binarySearch', '([%s%s)I'%(u_sig,u_sig))
-        x[0].binarySearch_range = env.GetStaticMethodID(Arrays, 'binarySearch', '([%sII%s)I'%(u_sig,u_sig))
-    x[0].hashCode     = env.GetStaticMethodID(Arrays, 'hashCode', '([%s)I'%u_sig)
-    x[0].equals       = env.GetStaticMethodID(Arrays, 'equals',   '([%s[%s)Z'%(u_sig,u_sig))
-    x[0].toString     = env.GetStaticMethodID(Arrays, 'toString', '([%s)Ljava/lang/String;'%u_sig)
+        x[0].sort         = env.GetStaticMethodID(Arrays, u'sort', u'([%s)V'%u_sig)
+        x[0].sort_range   = env.GetStaticMethodID(Arrays, u'sort', u'([%sII)V'%u_sig)
+        x[0].binarySearch = env.GetStaticMethodID(Arrays, u'binarySearch', u'([%s%s)I'%(u_sig,u_sig))
+        x[0].binarySearch_range = env.GetStaticMethodID(Arrays, u'binarySearch', u'([%sII%s)I'%(u_sig,u_sig))
+    x[0].hashCode     = env.GetStaticMethodID(Arrays, u'hashCode', u'([%s)I'%u_sig)
+    x[0].equals       = env.GetStaticMethodID(Arrays, u'equals',   u'([%s[%s)Z'%(u_sig,u_sig))
+    x[0].toString     = env.GetStaticMethodID(Arrays, u'toString', u'([%s)Ljava/lang/String;'%u_sig)
 
 cdef JPrimArrayDef jpad_boolean, jpad_byte, jpad_char, jpad_short, jpad_int, jpad_long, jpad_float, jpad_double
 cdef JPrimArrayDef* jpads[8]
+cdef JPrimArrayDef* get_jpad(char sig) except NULL:
+    if sig == b'Z': return &jpad_boolean
+    if sig == b'B': return &jpad_byte
+    if sig == b'C': return &jpad_char
+    if sig == b'S': return &jpad_short
+    if sig == b'I': return &jpad_int
+    if sig == b'L': return &jpad_long
+    if sig == b'F': return &jpad_float
+    if sig == b'D': return &jpad_double
+    raise ValueError()
+
 
 ########## Primitive Array Iterator Wrapper ##########
 cdef class JPrimArrayIter(object):
@@ -492,12 +495,6 @@ cdef class JPrimArrayPointer(object):
     attribute, and when the function finishes this object will be dealloced and the array released.
     By default it uses the 'critical' functions and does it in a read-only mode.
     """
-    cdef JPrimitiveArray arr
-    cdef JEnv env
-    cdef void* ptr
-    cdef bint readonly
-    cdef jboolean isCopy
-    cdef ReleasePrimArrayElements rel
     def __cinit__(self, JEnv env, JPrimitiveArray arr, bint critical=True, bint readonly=True):
         self.arr = arr
         self.env = env
@@ -509,14 +506,6 @@ cdef class JPrimArrayPointer(object):
         else:
             self.rel = arr.p.rel_elems
             self.ptr = arr.p.get_elems(env, arr.arr, &self.isCopy, arr.length)
-    cdef inline release(self):
-        cdef JEnv env = self.env
-        if self.ptr is not NULL:
-            if env is None: env = jenv()
-            self.rel(env, self.arr.arr, self.ptr, JNI_ABORT if self.readonly and self.isCopy else 0)
-            self.ptr = NULL
-            self.arr = None
-            self.env = None
     def __dealloc__(self): self.release()
     IF PY_VERSION < PY_VERSION_3:
         # In Python 2.7, the new buffer protocol is supported, but numpy is silly and doesn't use
@@ -524,11 +513,11 @@ cdef class JPrimArrayPointer(object):
         # __buffer__ attribute of the JPrimitiveArray. We need this indirection so that we can release
         # the array when the buffer object is released.
         def __getreadbuffer__(self, Py_ssize_t segment, void **buf):
-            if segment != 0: raise ValueError('primitive arrays are single segment')
+            if segment != 0: raise ValueError(u'primitive arrays are single segment')
             buf[0] = self.ptr
             return self.arr.length*self.arr.p.itemsize
         def __getwritebuffer__(self, Py_ssize_t segment, void **buf):
-            if segment != 0: raise ValueError('primitive arrays are single segment')
+            if segment != 0: raise ValueError(u'primitive arrays are single segment')
             buf[0] = self.ptr
             self.readonly = False
             return self.arr.length*self.arr.p.itemsize
@@ -537,7 +526,9 @@ cdef class JPrimArrayPointer(object):
             return 1
 
 
-########## Java Primitive Array ##########
+#####################################
+########## Primitive Array ##########
+#####################################
 cdef class JPrimitiveArray(JArray):
     """
     Base class for clases that wrap a Java primitive array. This provides the following methods,
@@ -614,8 +605,6 @@ cdef class JPrimitiveArray(JArray):
         hash(arr)    -> hashCode(arr)
         str(arr)     -> toString(arr)
     """
-    cdef JPrimArrayDef* p
-    """The primitive array definitions for this array."""
 
     @staticmethod
     cdef JPrimitiveArray new_raw(JEnv env, object cls, Py_ssize_t length, JPrimArrayDef* p):
@@ -651,11 +640,10 @@ cdef class JPrimitiveArray(JArray):
         array.array, an object that exports the buffer protocol, or a sequence-like object.
         """
         cdef JEnv env = jenv()
-        cdef Py_ssize_t n
+        cdef Py_ssize_t n, addl
         cdef JPrimArrayPointer ptr
         cdef JPrimitiveArray arr
         cdef int kind
-        cdef jsize pairs
         cdef void* data
         cdef bytes b
         cdef Py_buffer buf
@@ -681,13 +669,13 @@ cdef class JPrimitiveArray(JArray):
             try: n = PyNumber_Index(arg)
             except TypeError: pass
             else:
-                if n < 0: raise ValueError('Cannot create negative sized array')
+                if n < 0: raise ValueError(u'Cannot create negative sized array')
                 return JPrimitiveArray.new_raw(env, cls, n, p)
 
             # bytes/bytearray
             if PyBytes_Check(arg) or PyByteArray_Check(arg):
                 n = len(arg)
-                if (n%p.itemsize) != 0: raise ValueError('length of bytes or bytearray must be a multiple of %d'%p.itemsize)
+                if (n%p.itemsize) != 0: raise ValueError(u'length of bytes or bytearray must be a multiple of %d'%p.itemsize)
                 n //= p.itemsize
                 arr = JPrimitiveArray.new_raw(env, cls, n, p)
                 p.set(env, arr.arr, 0, <jsize>n,
@@ -696,23 +684,22 @@ cdef class JPrimitiveArray(JArray):
 
             # unicode -> CharArray
             if p.type == PT_Char and PyUnicode_Check(arg):
-                n = get_unicode_len(arg)
-                if sizeof(Py_ssize_t) > sizeof(jsize) and n > 0x7FFFFFFF: raise OverflowError()
-                pairs = get_addl_chars_needed(arg, 0, <jsize>n)
-                if sizeof(Py_ssize_t) > sizeof(jsize) and n+pairs > 0x7FFFFFFF: raise OverflowError()
-                arr = JPrimitiveArray.new_raw(env, cls, <jsize>(n+pairs), p)
-                set_char_array(env, arg, 0, arr, 0, <jsize>n)
+                n = len(arg)
+                addl = addl_chars_needed(arg, 0, n)
+                if sizeof(Py_ssize_t) > sizeof(jsize) and (n > 0x7FFFFFFF or n+addl > 0x7FFFFFFF): raise OverflowError()
+                arr = JPrimitiveArray.new_raw(env, cls, <jsize>(n+addl), p)
+                copy_uni_to_char_array(arg, 0, n, arr, 0)
                 return arr
             
             # array.array
-            if JPrimitiveArray.check_arrayarray(arg, p):
+            if check_arrayarray(arg, p):
                 n = (len(arg) // p.itemsize) if arg.itemsize == 1 else len(arg)
                 arr = JPrimitiveArray.new_raw(env, cls, n, p)
                 p.set(env, arr.arr, 0, <jsize>n, (<array>arg).data.as_voidptr)
                 return arr
 
             # object with buffer protocol
-            if JPrimitiveArray.get_buffer(arg, p, &buf):
+            if get_buffer(arg, p, &buf):
                 try:
                     n = buf.len // p.itemsize
                     arr = JPrimitiveArray.new_raw(env, cls, n, p)
@@ -744,57 +731,6 @@ cdef class JPrimitiveArray(JArray):
     #PyBUF_ANY_CONTIGUOUS = 0x080 | PyBUF_STRIDES
     #PyBUF_INDIRECT       = 0x100 | PyBUF_STRIDES   must have suboffset set, but can be set to NULL
     # Memoryview uses 0x11C (PyBUF_INDIRECT|PyBUF_FORMAT)
-    @staticmethod
-    cdef bint get_buffer(object o, JPrimArrayDef* p, Py_buffer *buf, bint writable=False) except -1:
-        """
-        Gets a buffer from a Python object that is compatible with the primitive array definitions
-        given. If this is not possible, False is returned. Otherwise True is returned and the
-        buffer object is filled out. If True is returned, PyBuffer_Release needs to be called on
-        the buffer object.
-        """
-        cdef bytes format, bo
-        cdef jsize itmsz
-        cdef bint good, native_bo
-        if not PyObject_CheckBuffer(o): return False
-        cdef int flags = (PyBUF_WRITABLE if writable else 0)|PyBUF_ND|PyBUF_FORMAT|PyBUF_SIMPLE
-        PyObject_GetBuffer(o, buf, flags)
-        try:
-            # Very basic checks for failure first - readonly flag, length, and number of dimensions
-            if writable and buf.readonly or (buf.len%p.itemsize) != 0 or buf.ndim > 1:
-                PyBuffer_Release(buf)
-                return False
-            itmsz, format, native_bo = JPrimitiveArray.get_buffer_info(buf)
-            # A good/useable buffer is a simple buffer (B with size 1) or a buffer of the same
-            # basic type with the same sized items and the same byte ordering
-            good = ((itmsz == 1 and format == b'B') or
-                    (native_bo and p.itemsize == itmsz and format in p.buffer_formats))
-            if not good: PyBuffer_Release(buf)
-            return good
-        except: PyBuffer_Release(buf); raise
-    @staticmethod
-    cdef tuple get_buffer_info(Py_buffer *buf):
-        """
-        Gets the basic information about a buffer from the buffer pointer, returning a tuple of
-        itemsize (calculated if needed), format (without the byte-order mark), and a boolean if the
-        byte order is the native byteorder.
-        """
-        # Get format and itemsize of the buffer
-        cdef bytes format = b'B' if buf.format is NULL else buf.format
-        cdef Py_ssize_t itmsz = buf.itemsize
-        # PyBuffer_SizeFromFormat would be best, but it isn't implemented
-        #if itmsz <= 0: buf.itemsize = itmsz = PyBuffer_SizeFromFormat(format)
-        if itmsz <= 0:
-            from struct import calcsize
-            buf.itemsize = itmsz = calcsize(format)
-        # Get the byte ordering (@ and = are native, > and ! are big endian, and < is little endian)
-        cdef bytes bo = b'@' # default value
-        if format[0] in b'@=<>!':
-            bo = format[0]
-            if bo == b'!': bo = b'>'
-            format = format[1:]
-        import sys
-        cdef bint native_bo = itmsz == 1 or (bo in b'@=') or bo == (b'<' if sys.byteorder=='little' else b'>')
-        return itmsz, format, native_bo
     def __getbuffer__(self, Py_buffer *buffer, int flags):
         """
         Gets the 1D buffer of this object, supporting all flags. Regardless of the flags given, if
@@ -838,13 +774,13 @@ cdef class JPrimitiveArray(JArray):
     def tolist(self, start=None, stop=None):
         """Return a list with a copy of the array data."""
         cdef jsize i,j
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        i,j = check_slice(start, stop, 1, self.length)
         cdef JPrimArrayPointer ptr = JPrimArrayPointer(jenv(), self)
         return self.p.tolist(ptr.ptr, i, j)
     def tobytearray(self, start=None, stop=None):
         """Return a bytearray with a copy of the array data."""
         cdef jsize i,j
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        i,j = check_slice(start, stop, 1, self.length)
         cdef jsize size = (j-i)*self.p.itemsize
         cdef bytearray b = PyByteArray_FromStringAndSize(NULL, size)
         self.p.get(jenv(), self.arr, i, j-i, PyByteArray_AS_STRING(b))
@@ -852,7 +788,7 @@ cdef class JPrimitiveArray(JArray):
     def tobytes(self, start=None, stop=None):
         """Return a bytes with a copy of the array data."""
         cdef jsize i,j
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        i,j = check_slice(start, stop, 1, self.length)
         cdef jsize size = (j-i)*self.p.itemsize
         cdef bytes b = PyBytes_FromStringAndSize(NULL, size)
         self.p.get(jenv(), self.arr, i, <jsize>(j-i), PyBytes_AS_STRING(b))
@@ -860,9 +796,9 @@ cdef class JPrimitiveArray(JArray):
     def toarray(self, start=None, stop=None):
         """Return an array with a copy of the array data."""
         cdef jsize i,j
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        i,j = check_slice(start, stop, 1, self.length)
         cdef void* arr_d = self.p.array_descr
-        if arr_d is NULL: raise TypeError('Unable to convert to array, no typecode is acceptable')
+        if arr_d is NULL: raise TypeError(u'Unable to convert to array, no typecode is acceptable')
         cdef array a = newarrayobject(array, j-i, arr_d)
         self.p.get(jenv(), self.arr, i, <jsize>(j-i), a.data.as_chars)
         return a
@@ -874,7 +810,7 @@ cdef class JPrimitiveArray(JArray):
         of the destination object.
         """
         cdef jsize i,j,n
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        i,j = check_slice(start, stop, 1, self.length)
         n = j-i
         if n == 0: return
 
@@ -889,7 +825,7 @@ cdef class JPrimitiveArray(JArray):
             if dst_off < 0:
                 dst_off += dst_arr.length
                 if dst_off < 0: dst_off = 0
-            if dst_off+n > dst_arr.length: raise ValueError('not enough space in destination Java array')
+            if dst_off+n > dst_arr.length: raise ValueError(u'not enough space in destination Java array')
             ptr = JPrimArrayPointer(env, self)
             self.p.set(env, dst_arr.arr, <jsize>dst_off, n, (<char*>ptr.ptr)+i*self.p.itemsize)
         elif PyByteArray_Check(dst):
@@ -897,34 +833,36 @@ cdef class JPrimitiveArray(JArray):
             if dst_off < 0:
                 dst_off += PyByteArray_GET_SIZE(dst)
                 if dst_off < 0: dst_off = 0
-            if dst_off+n*self.p.itemsize > PyByteArray_GET_SIZE(dst): raise ValueError('not enough space in destination bytearray')
+            if dst_off+n*self.p.itemsize > PyByteArray_GET_SIZE(dst): raise ValueError(u'not enough space in destination bytearray')
             self.p.get(env, self.arr, i, n, PyByteArray_AS_STRING(dst)+dst_off)
-        elif JPrimitiveArray.check_arrayarray(dst, self.p):
+        elif check_arrayarray(dst, self.p):
             # Copy to array.array
             if dst_off < 0:
                 dst_off += len(dst)
                 if dst_off < 0: dst_off = 0
-            if dst_off+((n*self.p.itemsize) if dst.itemsize==1 else n) > len(dst): raise ValueError('not enough space in destination array.array')
+            if dst_off+((n*self.p.itemsize) if dst.itemsize==1 else n) > len(dst): raise ValueError(u'not enough space in destination array.array')
             self.p.get(env, self.arr, i, n, (<array>dst).data.as_chars+dst_off)
-        elif JPrimitiveArray.get_buffer(dst, self.p, &buf, True):
+        elif get_buffer(dst, self.p, &buf, True):
             # Copy to buffer
             try:
                 if dst_off < 0:
                     dst_off += buf.len
                     if dst_off < 0: dst_off = 0
-                if dst_off+n*self.p.itemsize != buf.len: raise ValueError('not enough space in destination buffer')
+                if dst_off+n*self.p.itemsize != buf.len: raise ValueError(u'not enough space in destination buffer')
                 self.p.get(env, self.arr, i, n, (<char*>buf.buf)+dst_off*buf.itemsize)
             finally: PyBuffer_Release(&buf)
-        else: raise TypeError('dst')
+        else: raise TypeError(u'dst')
     def copyfrom(self, JObjectArray src, start=None, stop=None, Py_ssize_t src_off=0):
         """
         Copy the data from another Java array, bytearray, bytes, unicode (for char arrays),
-        array.array, buffer-object, or sequence to this array. Copies the data to start
-        (inclusive) to stop (exclusive) from the offset src_off in the source object. The source
-        offset is interpreted in the data type of the source object.
+        array.array, buffer-object, or sequence to this array. Fills in the array from start
+        (inclusive) to stop (exclusive) using the data in src, starting with the src_off position.
+        The source offset is interpreted in the data type of the source object and supports
+        negative values that wrap around. If the source data is shorter than the range given the
+        an error occurs. If the source data is longer than the range it is truncated.
         """
-        cdef jsize i,j,n
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        cdef jsize i,j,n,uni_len
+        i,j = check_slice(start, stop, 1, self.length)
         n = j-i
         if n == 0: return
         
@@ -941,7 +879,7 @@ cdef class JPrimitiveArray(JArray):
             if src_off < 0:
                 src_off += src_arr.length
                 if src_off < 0: src_off = 0
-            if src_off+n > src_arr.length: raise ValueError('not enough elements in source Java array')
+            if src_off+n > src_arr.length: raise ValueError(u'not enough elements in source Java array')
             ptr = JPrimArrayPointer(env, src_arr)
             src_arr.p.set(env, self.arr, i, n, (<char*>ptr.ptr)+src_off*src_arr.p.itemsize)
         elif PyByteArray_Check(src) or PyBytes_Check(src):
@@ -949,38 +887,29 @@ cdef class JPrimitiveArray(JArray):
             if src_off < 0:
                 src_off += len(src)
                 if src_off < 0: src_off = 0
-            if src_off+n*self.p.itemsize > len(src): raise ValueError('not enough elements in source bytearray/bytes')
+            if src_off+n*self.p.itemsize > len(src): raise ValueError(u'not enough elements in source bytearray/bytes')
             self.p.set(env, self.arr, i, n, (PyByteArray_AS_STRING(src) if PyByteArray_Check(src) else PyBytes_AS_STRING(src))+src_off)
         elif self.p.type == PT_Char and PyUnicode_Check(src):
             # Copy from unicode
+            uni_len = len(src)
             if src_off < 0:
-                src_off += get_unicode_len(src)
+                src_off += uni_len
                 if src_off < 0: src_off = 0
-            IF PY_VERSION >= PY_VERSION_3_3:
-                if PyUnicode_KIND(src) == PyUnicode_4BYTE_KIND:
-                    copy_char_array_from_ucs4(env, PyUnicode_DATA(src), src_off, PyUnicode_GET_LENGTH(src), self, i, n)
-                else:
-                    if src_off+n > get_unicode_len(src): raise ValueError('not enough elements in source unicode')
-                    set_char_array(env, src, src_off, self, i, n)
-            ELIF PY_UNICODE_WIDE:
-                copy_char_array_from_ucs4(env, PyUnicode_AS_UNICODE(src), src_off, PyUnicode_GET_SIZE(src), self, i, n)
-            ELSE:
-                if src_off+n > get_unicode_len(src): raise ValueError('not enough elements in source unicode')
-                set_char_array(env, src, src_off, self, i, n)            
-        elif JPrimitiveArray.check_arrayarray(src, self.p):
+            copyfrom_uni_to_char_array(src, src_off, uni_len-src_off, self, i, n)
+        elif check_arrayarray(src, self.p):
             # Copy from array.array
             if src_off < 0:
                 src_off += len(src)
                 if src_off < 0: src_off = 0
-            if src_off+((n*self.p.itemsize) if src.itemsize==1 else n) > len(src): raise ValueError('not enough elements in source array.array')
+            if src_off+((n*self.p.itemsize) if src.itemsize==1 else n) > len(src): raise ValueError(u'not enough elements in source array.array')
             self.p.set(env, self.arr, i, n, (<array>src).data.as_chars+src_off)
-        elif JPrimitiveArray.get_buffer(src, self.p, &buf, True):
+        elif get_buffer(src, self.p, &buf, True):
             # Copy from buffer
             try:
                 if src_off < 0:
                     src_off += buf.len
                     if src_off < 0: src_off = 0
-                if src_off+n*self.p.itemsize != buf.len: raise ValueError('not enough elements in source buffer')
+                if src_off+n*self.p.itemsize != buf.len: raise ValueError(u'not enough elements in source buffer')
                 self.p.set(env, self.arr, i, n, (<char*>buf.buf)+src_off*buf.itemsize)
             finally: PyBuffer_Release(&buf)
         elif isinstance(src, Iterable) and isinstance(src, Sized):
@@ -988,21 +917,10 @@ cdef class JPrimitiveArray(JArray):
             if src_off < 0:
                 src_off += len(src)
                 if src_off < 0: src_off = 0
-            if src_off+n > len(src): raise ValueError('not enough elements in source sequence')
+            if src_off+n > len(src): raise ValueError(u'not enough elements in source sequence')
             ptr = JPrimArrayPointer(env, self, readonly=False)
             self.p.setseq(ptr.ptr, src if src_off == 0 else src[src_off:], i)
-        else: raise TypeError('src')
-        # unicode
-        
-    @staticmethod
-    cdef inline bint check_arrayarray(object a, JPrimArrayDef* p) except -1:
-        """
-        Checks that an object is an array.array with appropiate typecode and itemsize for the
-        primitive array definition given.
-        """
-        return isinstance(a, array) and (
-                        a.typecode == 'B' and (len(a)%p.itemsize)==0 or
-                        a.typecode in p.array_typecodes and a.itemsize == p.itemsize)
+        else: raise TypeError(u'src')
 
     ##### Get Functions #####
     def __getitem__(self, index):
@@ -1013,12 +931,12 @@ cdef class JPrimitiveArray(JArray):
         """
         cdef jsize i, j
         if PySlice_Check(index):
-            if index.step is not None and index.step != 1: raise ValueError('only slices with a step of 1 (default) are supported')
+            if index.step is not None and index.step != 1: raise ValueError(u'only slices with a step of 1 (default) are supported')
             i = 0 if index.start is None else index.start
             j = self.length if index.stop is None else index.stop
             return self.copy(i, j)
         cdef jvalue x
-        self.p.get(jenv(), self.arr, JArray.check_index(index, self.length), 1, &x)
+        self.p.get(jenv(), self.arr, check_index(index, self.length), 1, &x)
         return self.p.primitive2obj(&x)
     cdef copy(self, jsize i, jsize j):
         """
@@ -1033,7 +951,7 @@ cdef class JPrimitiveArray(JArray):
             if i < 0: i = 0
         elif i > self.length: i = self.length
         if j < 0: j += self.length
-        if i > j: raise IndexError('%d > %d' % (i,j))
+        if i > j: raise IndexError(u'%d > %d' % (i,j))
         cdef JEnv env = jenv()
         cdef JPrimitiveArray arr = JPrimitiveArray.new_raw(type(self), env, j-i, self.p)
         cdef JPrimArrayPointer ptr = JPrimArrayPointer(env, self)
@@ -1053,69 +971,26 @@ cdef class JPrimitiveArray(JArray):
         cdef JPrimArrayPointer ptr
         if PySlice_Check(index):
             from collections import Iterable, Sized
-            i,j = JArray.check_slice(index.start, index.stop, index.step, self.length)
+            i,j = check_slice(index.start, index.stop, index.step, self.length)
             n = j-i
             if n == 0: return
-            if isinstance(value, type(self)): self.set_from_jpa(value, i, n)
-            elif PyBytes_Check(value):        self.set_from_bytes(value, i, n)
-            elif PyByteArray_Check(value):    self.set_from_bytearray(value, i, n)
-            elif self.p.type == PT_Char and PyUnicode_Check(value): self.set_from_unicode(value, i, n)
-            elif JPrimitiveArray.check_arrayarray(value, self.p): self.set_from_arrayarray(value, i, n)
-            elif JPrimitiveArray.get_buffer(value, self.p, &buf): self.set_from_buffer(value, i, n, &buf)
-            elif isinstance(value, Iterable) and isinstance(value, Sized): self.set_from_seq(value, i, n)
+            if isinstance(value, type(self)): primarr_set_from_jpa(self, value, i, n)
+            elif PyBytes_Check(value):        primarr_set_from_bytes(self, value, i, n)
+            elif PyByteArray_Check(value):    primarr_set_from_bytearray(self, value, i, n)
+            elif self.p.type == PT_Char and PyUnicode_Check(value): primarr_set_from_unicode(self, value, i, n)
+            elif check_arrayarray(value, self.p): primarr_set_from_arrayarray(self, value, i, n)
+            elif get_buffer(value, self.p, &buf): primarr_set_from_buffer(self, value, i, n, &buf)
+            elif isinstance(value, Iterable) and isinstance(value, Sized): primarr_set_from_seq(self, value, i, n)
             else:
                 ptr = JPrimArrayPointer(jenv(), self, readonly=False)
                 self.p.fill(ptr.ptr, i, j, value)
             return
         cdef jvalue x
         self.p.obj2primitive(value, &x)
-        self.p.set(jenv(), self.arr, JArray.check_index(index, self.length), 1, &x)
-    cdef int set_from_jpa(self, JPrimitiveArray arr, jsize i, jsize n) except -1:
-        """Copy n elements from another Java array to index i in this array."""
-        if arr.length != n: raise ValueError('can only set from same-sized Java array')
-        cdef JEnv env = jenv()
-        cdef JPrimArrayPointer ptr = JPrimArrayPointer(env, arr)
-        self.p.set(env, self.arr, i, n, ptr.ptr)
-        return 0
-    cdef int set_from_bytes(self, bytes b, jsize i, jsize n) except -1:
-        """Copy n elements from a bytes to index i in this array."""
-        if PyBytes_GET_SIZE(b)*self.p.itemsize != n: raise ValueError('can only set from an equivilent number of bytes')
-        self.p.set(jenv(), self.arr, i, n, PyBytes_AS_STRING(b))
-        return 0
-    cdef int set_from_bytearray(self, bytearray b, jsize i, jsize n) except -1:
-        """Copy n elements from a bytearray to index i in this array."""
-        if PyByteArray_GET_SIZE(b)*self.p.itemsize != n: raise ValueError('can only set from an equivilent number of bytes')
-        self.p.set(jenv(), self.arr, i, n, PyByteArray_AS_STRING(b))
-        return 0
-    cdef int set_from_unicode(self, unicode s, jsize i, jsize n) except -1:
-        """Copy n elements from a unicode to index i in this array."""
-        cdef Py_ssize_t uni_len = get_unicode_len(s)
-        cdef jsize pairs = get_addl_chars_needed(s, 0, <jsize>uni_len)
-        if uni_len + pairs != n: raise ValueError('can only set from a same-sized unicode string')
-        set_char_array(jenv(), s, 0, self, i, <jsize>uni_len)
-        return 0
-    cdef int set_from_arrayarray(self, array a, jsize i, jsize n) except -1:
-        """Copy n elements from an array.array to index i in this array."""
-        cdef Py_ssize_t a_n = (len(a)*self.p.itemsize) if a.itemsize == 1 else len(a)
-        if a_n != n: raise ValueError('can only set from a same-sized array.array object')
-        self.p.set(jenv(), self.arr, i, n, a.data.as_voidptr)
-        return 0
-    cdef int set_from_buffer(self, obj, jsize i, jsize n, Py_buffer* buf) except -1:
-        """Copy n elements from a buffer-object to index i in this array."""
-        try:
-            if n != buf.len//self.p.itemsize: raise ValueError('can only set from a same-sized buffer object')
-            self.p.set(jenv(), self.arr, i, n, buf.buf)
-        finally: PyBuffer_Release(buf)
-        return 0
-    cdef int set_from_seq(self, seq, jsize i, jsize n) except -1:
-        """Copy n elements from a sequence-like object to index i in this array."""
-        if len(seq) != n: raise ValueError('can only set from same-sized sequence')
-        ptr = JPrimArrayPointer(jenv(), self, readonly=False)
-        self.p.setseq(ptr.ptr, seq, i)
-        return 0
+        self.p.set(jenv(), self.arr, check_index(index, self.length), 1, &x)
 
     def __repr__(self):
-        return ("<Java array %s[%d] at 0x%08x>") % (get_object_class(self).component_type.name, self.length, get_identity(self))
+        return u"<Java array %s[%d] at 0x%08x>" % (get_object_class(self).component_type.name, self.length, get_identity(self))
 
     ##### Methods that are forwarded to primitive-type specific functions #####
     def __iter__(self):     return JPrimArrayIter(self, False)
@@ -1125,7 +1000,7 @@ cdef class JPrimitiveArray(JArray):
         return self.p.contains(ptr.ptr, self.length, val)
     def index(self, val, start=0, stop=None):
         cdef jsize i,j
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        i,j = check_slice(start, stop, 1, self.length)
         cdef JPrimArrayPointer ptr = JPrimArrayPointer(jenv(), self)
         return self.p.index(ptr.ptr, i, j, val)
     def count(self, val):
@@ -1137,18 +1012,18 @@ cdef class JPrimitiveArray(JArray):
 
     ##### Methods that are forwarded to java.util.Arrays #####
     def sort(self, fromIndex=None, toIndex=None):
-        if self.p.sort is NULL: raise AttributeError('sort')
+        if self.p.sort is NULL: raise AttributeError(u'sort')
         cdef jsize n = self.length
         cdef jvalue val[3]
         val[0].l = self.arr
         if fromIndex is None and toIndex is None:
-            jenv().CallStaticVoidMethod(Arrays, self.p.sort, val, JArray.withgil(n*n))
+            jenv().CallStaticVoidMethod(Arrays, self.p.sort, val, withgil(n*n))
         else:
             val[1].i = 0 if fromIndex is None else fromIndex
             val[2].i = n if toIndex is None else toIndex
-            jenv().CallStaticVoidMethod(Arrays, self.p.sort_range, val, JArray.withgil(n*n))
+            jenv().CallStaticVoidMethod(Arrays, self.p.sort_range, val, withgil(n*n))
     def binarySearch(self, key, fromIndex=None, toIndex=None):
-        if self.p.binarySearch is NULL: raise AttributeError('binarySearch')
+        if self.p.binarySearch is NULL: raise AttributeError(u'binarySearch')
         cdef jvalue val[4]
         val[0].l = self.arr
         if fromIndex is None and toIndex is None:
@@ -1162,23 +1037,125 @@ cdef class JPrimitiveArray(JArray):
     def __hash__(self):
         cdef jvalue val
         val.l = self.arr
-        return jenv().CallStaticIntMethod(Arrays, self.p.hashCode, &val, JArray.withgil(self.length))
+        return jenv().CallStaticIntMethod(Arrays, self.p.hashCode, &val, withgil(self.length))
     def __richcmp__(self, other, int op):
         if op != 2 and op != 3 or not isinstance(other, type(self)): return NotImplemented
         cdef jvalue val[2]
         cdef JPrimitiveArray a = self, b = other
         val[0].l = a.arr; val[1].l = b.arr
-        cdef bint eq = jenv().CallStaticBooleanMethod(Arrays, a.p.equals, val, JArray.withgil(self.length))
+        cdef bint eq = jenv().CallStaticBooleanMethod(Arrays, a.p.equals, val, withgil(self.length))
         return eq if op == 2 else not eq
-    cdef inline unicode str(self):
-        cdef jvalue val
-        val.l = self.arr
-        return jenv().CallStaticObjectMethod(Arrays, self.p.toString, &val, JArray.withgil(self.length//8))
     IF PY_VERSION < PY_VERSION_3:
-        def __unicode__(self): return self.str()
-        def __str__(self): return utf8(self.str())
+        def __unicode__(self): return primarr_str(self)
+        def __str__(self): return utf8(primarr_str(self))
     ELSE:
-        def __str__(self): return self.str()
+        def __str__(self): return primarr_str(self)
+
+########## Primitive Array Utilities ##########
+cdef bint get_buffer(object o, JPrimArrayDef* p, Py_buffer *buf, bint writable=False) except -1:
+    """
+    Gets a buffer from a Python object that is compatible with the primitive array definitions
+    given. If this is not possible, False is returned. Otherwise True is returned and the
+    buffer object is filled out. If True is returned, PyBuffer_Release needs to be called on
+    the buffer object.
+    """
+    cdef bytes format, bo
+    cdef jsize itmsz
+    cdef bint good, native_bo
+    if not PyObject_CheckBuffer(o): return False
+    cdef int flags = (PyBUF_WRITABLE if writable else 0)|PyBUF_ND|PyBUF_FORMAT|PyBUF_SIMPLE
+    PyObject_GetBuffer(o, buf, flags)
+    try:
+        # Very basic checks for failure first - readonly flag, length, and number of dimensions
+        if writable and buf.readonly or (buf.len%p.itemsize) != 0 or buf.ndim > 1:
+            PyBuffer_Release(buf)
+            return False
+        itmsz, format, native_bo = get_buffer_info(buf)
+        # A good/useable buffer is a simple buffer (B with size 1) or a buffer of the same
+        # basic type with the same sized items and the same byte ordering
+        good = ((itmsz == 1 and format == b'B') or
+                (native_bo and p.itemsize == itmsz and format in p.buffer_formats))
+        if not good: PyBuffer_Release(buf)
+        return good
+    except: PyBuffer_Release(buf); raise
+cdef tuple get_buffer_info(Py_buffer *buf):
+    """
+    Gets the basic information about a buffer from the buffer pointer, returning a tuple of
+    itemsize (calculated if needed), format (without the byte-order mark), and a boolean if the
+    byte order is the native byteorder.
+    """
+    # Get format and itemsize of the buffer
+    cdef bytes format = b'B' if buf.format is NULL else buf.format
+    cdef Py_ssize_t itmsz = buf.itemsize
+    # PyBuffer_SizeFromFormat would be best, but it isn't implemented
+    #if itmsz <= 0: buf.itemsize = itmsz = PyBuffer_SizeFromFormat(format)
+    if itmsz <= 0:
+        from struct import calcsize
+        buf.itemsize = itmsz = calcsize(format)
+    # Get the byte ordering (@ and = are native, > and ! are big endian, and < is little endian)
+    cdef bytes bo = b'@' # default value
+    if format[0] in b'@=<>!':
+        bo = format[0]
+        if bo == b'!': bo = b'>'
+        format = format[1:]
+    import sys
+    cdef bint native_bo = itmsz == 1 or (bo in b'@=') or bo == (b'<' if sys.byteorder=='little' else b'>')
+    return itmsz, format, native_bo
+cdef inline bint check_arrayarray(object a, JPrimArrayDef* p) except -1:
+    """
+    Checks that an object is an array.array with appropiate typecode and itemsize for the primitive
+    array definition given.
+    """
+    return isinstance(a, array) and (
+                a.typecode == u'B' and (len(a)%p.itemsize)==0 or
+                a.typecode in p.array_typecodes and a.itemsize == p.itemsize)
+cdef int primarr_set_from_jpa(JPrimitiveArray self, JPrimitiveArray arr, jsize i, jsize n) except -1:
+    """Copy n elements from another Java array to index i in this array."""
+    if arr.length != n: raise ValueError(u'can only set from same-sized Java array')
+    cdef JEnv env = jenv()
+    cdef JPrimArrayPointer ptr = JPrimArrayPointer(env, arr)
+    self.p.set(env, self.arr, i, n, ptr.ptr)
+    return 0
+cdef int primarr_set_from_bytes(JPrimitiveArray self, bytes b, jsize i, jsize n) except -1:
+    """Copy n elements from a bytes to index i in this array."""
+    if PyBytes_GET_SIZE(b)*self.p.itemsize != n: raise ValueError(u'can only set from an equivilent number of bytes')
+    self.p.set(jenv(), self.arr, i, n, PyBytes_AS_STRING(b))
+    return 0
+cdef int primarr_set_from_bytearray(JPrimitiveArray self, bytearray b, jsize i, jsize n) except -1:
+    """Copy n elements from a bytearray to index i in this array."""
+    if PyByteArray_GET_SIZE(b)*self.p.itemsize != n: raise ValueError(u'can only set from an equivilent number of bytes')
+    self.p.set(jenv(), self.arr, i, n, PyByteArray_AS_STRING(b))
+    return 0
+cdef int primarr_set_from_unicode(JPrimitiveArray self, unicode s, jsize i, jsize n) except -1:
+    """Copy n elements from a unicode to index i in this array."""
+    cdef Py_ssize_t uni_len = len(s), addl = addl_chars_needed(s, 0, uni_len)
+    if uni_len + addl != n: raise ValueError(u'can only set from a same-sized unicode string')
+    copy_uni_to_char_array(s, 0, uni_len, self, i)
+    return 0
+cdef int primarr_set_from_arrayarray(JPrimitiveArray self, array a, jsize i, jsize n) except -1:
+    """Copy n elements from an array.array to index i in this array."""
+    cdef Py_ssize_t a_n = (len(a)*self.p.itemsize) if a.itemsize == 1 else len(a)
+    if a_n != n: raise ValueError(u'can only set from a same-sized array.array object')
+    self.p.set(jenv(), self.arr, i, n, a.data.as_voidptr)
+    return 0
+cdef int primarr_set_from_buffer(JPrimitiveArray self, obj, jsize i, jsize n, Py_buffer* buf) except -1:
+    """Copy n elements from a buffer-object to index i in this array."""
+    try:
+        if n != buf.len//self.p.itemsize: raise ValueError(u'can only set from a same-sized buffer object')
+        self.p.set(jenv(), self.arr, i, n, buf.buf)
+    finally: PyBuffer_Release(buf)
+    return 0
+cdef int primarr_set_from_seq(JPrimitiveArray self, seq, jsize i, jsize n) except -1:
+    """Copy n elements from a sequence-like object to index i in this array."""
+    if len(seq) != n: raise ValueError(u'can only set from same-sized sequence')
+    ptr = JPrimArrayPointer(jenv(), self, readonly=False)
+    self.p.setseq(ptr.ptr, seq, i)
+    return 0
+cdef inline unicode primarr_str(JPrimitiveArray arr):
+    cdef jvalue val
+    val.l = arr.arr
+    return jenv().CallStaticObjectMethod(Arrays, arr.p.toString, &val, withgil(arr.length//8))
+
 
 
 ##################################
@@ -1188,7 +1165,7 @@ cdef class JObjectArray(JArray):
     @staticmethod
     cdef unicode get_objarr_classname(JClass elemClass):
         assert not elemClass.is_primitive()
-        return ('[' + elemClass.name) if elemClass.is_array() else ('[L%s;' % elemClass.name)
+        return (u'[' + elemClass.name) if elemClass.is_array() else (u'[L%s;' % elemClass.name)
 
     @staticmethod
     cdef JObjectArray new_raw(JEnv env, Py_ssize_t length, JClass elementClass, jobject init = NULL):
@@ -1225,13 +1202,13 @@ cdef class JObjectArray(JArray):
             if isinstance(arg, JObjectArray):
                 n = (<JObjectArray>arg).length
                 val[0].l = (<JObjectArray>arg).arr; val[1].i = n; val[2].l = elementClass.clazz
-                return jenv().CallStaticObjectMethod(Arrays, ObjectArrayDef.copyOf_nt, val, JArray.withgil(n*4))
+                return jenv().CallStaticObjectMethod(Arrays, ObjectArrayDef.copyOf_nt, val, withgil(n*4))
 
             # Integer -> empty array of the given length
             try: n = PyNumber_Index(arg)
             except TypeError: pass
             else:
-                if n < 0: raise ValueError('Cannot create negative sized array')
+                if n < 0: raise ValueError(u'Cannot create negative sized array')
                 return JObjectArray.new_raw(env, n, elementClass)
 
             # Sequence -> forward to having more than 1 argument
@@ -1250,80 +1227,39 @@ cdef class JObjectArray(JArray):
     def __cinit__(self, JObject obj):
         if obj is None: raise ValueError()
         self.wrap(jenv(), obj)
-
-    @staticmethod
-    cdef list tolist_prim(JEnv env, jarray arr, JClass prim):
-        cdef char pn = prim.funcs.sig
-        cdef jsize n = env.GetArrayLength(arr)
-        cdef jboolean isCopy
-        cdef void *ptr = env.GetPrimitiveArrayCritical(arr, &isCopy)
-        try:
-            if pn == b'Z': return tolist[jboolean](<jboolean*>ptr, 0, n)
-            if pn == b'B': return tolist[jbyte   ](<jbyte*>   ptr, 0, n)
-            if pn == b'C': return tolist[jchar   ](<jchar*>   ptr, 0, n)
-            if pn == b'S': return tolist[jshort  ](<jshort*>  ptr, 0, n)
-            if pn == b'I': return tolist[jint    ](<jint*>    ptr, 0, n)
-            if pn == b'L': return tolist[jlong   ](<jlong*>   ptr, 0, n)
-            if pn == b'F': return tolist[jfloat  ](<jfloat*>  ptr, 0, n)
-            if pn == b'D': return tolist[jdouble ](<jdouble*> ptr, 0, n)
-        finally: env.ReleasePrimitiveArrayCritical(arr, ptr, JNI_ABORT if isCopy else 0)
-    @staticmethod
-    cdef list tolist_deep(JEnv env, jobjectArray arr, jsize start, jsize stop):
-        cdef jobject obj
-        cdef JClass clazz
-        cdef jsize i, n = stop-start
-        cdef list out = PyList_New(n)
-        for i in xrange(n):
-            obj = env.GetObjectArrayElement(arr, start+i)
-            clazz = JClass.get(env, env.GetObjectClass(obj))
-            x = (object2py(obj) if not clazz.is_array() else
-                 JObjectArray.tolist_prim(env, <jarray>obj, clazz.component_type) if clazz.component_type.is_primitive() else
-                 JObjectArray.tolist_deep(env, <jobjectArray>obj, 0, env.GetArrayLength(<jarray>obj)))
-            Py_INCREF(x)
-            PyList_SET_ITEM(out, i, x)
-        return out
-    @staticmethod
-    cdef list tolist_shallow(JEnv env, jobjectArray arr, jsize start, jsize stop):
-        cdef jsize i, n = stop-start
-        cdef list out = PyList_New(n)
-        for i in xrange(n):
-            x = object2py(env.GetObjectArrayElement(arr, start+i))
-            Py_INCREF(x)
-            PyList_SET_ITEM(out, i, x)
-        return out
     def tolist(self, start=None, stop=None, bint deep=True):
         cdef jsize i,j
-        i,j = JArray.check_slice(start, stop, 1, self.length)
-        return (JObjectArray.tolist_deep(jenv(), <jobjectArray>self.arr, i, j) if deep else
-                JObjectArray.tolist_shallow(jenv(), <jobjectArray>self.arr, i, j))
+        i,j = check_slice(start, stop, 1, self.length)
+        return (tolist_deep(jenv(), <jobjectArray>self.arr, i, j) if deep else
+                tolist_shallow(jenv(), <jobjectArray>self.arr, i, j))
     def copyto(self, JObjectArray dst, start=None, stop=None, jsize dst_off=0):
         """
         Copy the data of this array to another Java array. Copies the data from start (inclusive)
         to stop (exclusive) to the offset dst_off in the destination object.
         """
         cdef jsize i,j,n
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        i,j = check_slice(start, stop, 1, self.length)
         n = j-i
         if n == 0: return
         if dst_off < 0:
             dst_off += dst.length
             if dst_off < 0: dst_off = 0
-        if dst_off + n > dst.length: raise ValueError('not enough space in destination Java array')
-        JArray.arraycopy(jenv(), self.arr, i, dst.arr, dst_off, n)
+        if dst_off + n > dst.length: raise ValueError(u'not enough space in destination Java array')
+        arraycopy(jenv(), self.arr, i, dst.arr, dst_off, n)
     def copyfrom(self, JObjectArray src, start=None, stop=None, jsize src_off=0):
         """
         Copy the data from another Java array to this array. Copies the data to start (inclusive)
         to stop (exclusive) from the offset src_off in the destination object.
         """
         cdef jsize i,j,n
-        i,j = JArray.check_slice(start, stop, 1, self.length)
+        i,j = check_slice(start, stop, 1, self.length)
         n = j-i
         if n == 0: return
         if src_off < 0:
             src_off += src.length
             if src_off < 0: src_off = 0
-        if src_off + n > src.length: raise ValueError('not enough elements in source Java array')
-        JArray.arraycopy(jenv(), src.arr, src_off, self.arr, i, n)
+        if src_off + n > src.length: raise ValueError(u'not enough elements in source Java array')
+        arraycopy(jenv(), src.arr, src_off, self.arr, i, n)
     def __getitem__(self, index):
         """
         Get an item, either from a slice with step 1 or a single index. Slicing uses copyOf. If
@@ -1332,7 +1268,7 @@ cdef class JObjectArray(JArray):
         """
         cdef jsize i, j
         if PySlice_Check(index):
-            if index.step is not None and index.step != 1: raise ValueError('only slices with a step of 1 (default) are supported')
+            if index.step is not None and index.step != 1: raise ValueError(u'only slices with a step of 1 (default) are supported')
             i = 0 if index.start is None else index.start
             j = self.length if index.stop is None else index.stop
             if i < 0:
@@ -1340,9 +1276,9 @@ cdef class JObjectArray(JArray):
                 if i < 0: i = 0
             elif i > self.length: i = self.length
             if j < 0: j += self.length
-            if i > j: raise IndexError('%d > %d' % (i,j))
+            if i > j: raise IndexError(u'%d > %d' % (i,j))
             return self.copyOf(i, j)
-        return object2py(jenv().GetObjectArrayElement(self.arr, JArray.check_index(index, self.length)))
+        return object2py(jenv().GetObjectArrayElement(self.arr, check_index(index, self.length)))
     def __setitem__(self, index, value):
         """
         Sets an item, either from a slice with step 1 or a single index. A slice requires the
@@ -1354,37 +1290,21 @@ cdef class JObjectArray(JArray):
         cdef jsize i, j, n
         if PySlice_Check(index):
             from collections import Iterable, Sized
-            i,j = JArray.check_slice(index.start, index.stop, index.step, self.length)
+            i,j = check_slice(index.start, index.stop, index.step, self.length)
             n = j-i
             if n == 0: return
-            if isinstance(value, JObjectArray): self.set_from_ja(env, value, i, n)
-            elif isinstance(value, Iterable) and isinstance(value, Sized): self.set_from_seq(env, value, i, n)
-            else: self._fill(env, i, j, value)
+            if isinstance(value, JObjectArray): objarr_set_from_ja(self, env, value, i, n)
+            elif isinstance(value, Iterable) and isinstance(value, Sized): objarr_set_from_seq(self, env, value, i, n)
+            else: objarr_fill(env, i, j, value)
         else:
             obj = py2object(env, value, get_object_class(self).component_type)
-            try: env.SetObjectArrayElement(<jobjectArray>self.arr, JArray.check_index(index, self.length), obj)
+            try: env.SetObjectArrayElement(<jobjectArray>self.arr, check_index(index, self.length), obj)
             finally: env.DeleteLocalRef(obj)
-    cdef int set_from_ja(self, JEnv env, JArray arr, jsize i, jsize n):
-        """Copy n elements from another Java array to index i in this array."""
-        if arr.length != n: raise ValueError('can only set from same-sized Java array')
-        JArray.arraycopy(env, arr.arr, 0, self.arr, i, n)
-        return 0
-    cdef int set_from_seq(self, JEnv env, seq, jsize i, jsize n) except -1:
-        """Copy n elements from a sequence-like object to index i in this array."""
-        if len(seq) != n: raise ValueError('can only set from same-sized sequence')
-        cdef JClass clazz = get_object_class(self).component_type
-        cdef jobjectArray arr = <jobjectArray>self.arr
-        cdef jobject obj
-        for i,val in enumerate(seq,i):
-            obj = py2object(env, val, clazz)
-            try: env.SetObjectArrayElement(arr, i, obj)
-            finally: env.DeleteLocalRef(obj)
-        return 0
     def __repr__(self):
         cdef JClass clazz = get_object_class(self)
         cdef jsize nd = -1
         while clazz.is_array(): nd += 1; clazz = clazz.component_type
-        return ("<Java array %s[%d]%s at 0x%08x>") % (clazz.name, self.length, '[]'*nd, get_identity(self))
+        return u"<Java array %s[%d]%s at 0x%08x>" % (clazz.name, self.length, u'[]'*nd, get_identity(self))
     def __iter__(self):
         cdef JEnv env = jenv()
         cdef jobjectArray arr = <jobjectArray>self.arr
@@ -1397,53 +1317,25 @@ cdef class JObjectArray(JArray):
         for i in xrange(self.length-1, -1, -1): yield object2py(env.GetObjectArrayElement(arr, i))
 
     ##### Basic sequence algorithms #####
-    @staticmethod
-    cdef inline jsize elem_eq(JNIEnv* env, jobject a, jobject b) nogil:
-        """
-        Calls a.equals(b) and deletes the local reference to b. Returns JNI_TRUE or JNI_FALSE for
-        the result of equals and -1 if there was a Java exception.
-        """
-        cdef jvalue val
-        val.l = b
-        cdef jboolean out = env[0].CallBooleanMethodA(env, a, ObjectDef.equals, &val)
-        env[0].DeleteLocalRef(env, b)
-        return -1 if env[0].ExceptionCheck(env) else out
-    cdef jsize find(self, val, jsize start, jsize stop) except -2:
-        cdef JEnv _env = jenv()
-        cdef JNIEnv* env = _env.env
-        cdef jobject obj, valobj = py2object(_env, val, get_object_class(self).component_type)
-        cdef jsize i, out = -1, n = stop-start, eq
-        cdef PyThreadState* gilstate = NULL if JArray.withgil(n//16) else PyEval_SaveThread()
-        cdef jobjectArray arr = <jobjectArray>self.arr
-        for i in xrange(start,stop):
-            obj = env[0].GetObjectArrayElement(env, arr, i)
-            if env[0].ExceptionCheck(env) == JNI_TRUE: break
-            eq = JObjectArray.elem_eq(env, valobj, obj)
-            if eq == JNI_TRUE: out = i; break
-            elif eq != JNI_FALSE: break
-        if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        try: _env.check_exc()
-        finally: _env.DeleteLocalRef(valobj)
-        return out
     def __contains__(self, val):
-        return self.find(val, 0, self.length) != -1
+        return objarr_find(self, val, 0, self.length) != -1
     def index(self, val, start=0, stop=None):
         cdef jsize i,j
-        i,j = JArray.check_slice(start, stop, 1, self.length)
-        i = self.find(val, i, j)
-        if i == -1: raise ValueError('%s is not in array'%val)
+        i,j = check_slice(start, stop, 1, self.length)
+        i = objarr_find(self, val, i, j)
+        if i == -1: raise ValueError(u'%s is not in array'%val)
         return i
     def count(self, val):
         cdef JEnv _env = jenv()
         cdef JNIEnv* env = _env.env
         cdef jobject obj, valobj = py2object(_env, val, get_object_class(self).component_type)
         cdef jsize i, count = 0, n = self.length, eq
-        cdef PyThreadState* gilstate = NULL if JArray.withgil(n//16) else PyEval_SaveThread()
+        cdef PyThreadState* gilstate = NULL if withgil(n//16) else PyEval_SaveThread()
         cdef jobjectArray arr = <jobjectArray>self.arr
         for i in xrange(n):
             obj = env[0].GetObjectArrayElement(env, arr, i)
             if env[0].ExceptionCheck(env) == JNI_TRUE: break
-            eq = JObjectArray.elem_eq(env, valobj, obj)
+            eq = elem_eq(env, valobj, obj)
             if eq == JNI_TRUE: count += 1
             elif eq != JNI_FALSE: break
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
@@ -1453,7 +1345,7 @@ cdef class JObjectArray(JArray):
     def reverse(self):
         cdef JEnv _env = jenv()
         cdef JNIEnv* env = _env.env
-        cdef PyThreadState* gilstate = NULL if JArray.withgil(self.length//4) else PyEval_SaveThread()
+        cdef PyThreadState* gilstate = NULL if withgil(self.length//4) else PyEval_SaveThread()
         cdef jobjectArray arr = <jobjectArray>self.arr
         cdef jsize i = 0, j = self.length - 1
         cdef jobject a, b
@@ -1477,6 +1369,7 @@ cdef class JObjectArray(JArray):
         A wrapper for java.util.Arrays.copyOf and java.util.Arrays.copyOfRange supporting
         extending the length of the array by filling in nulls and casting to a new array type.
         """
+        from .objects import JavaClass
         cdef jmethodID m
         cdef jsize off = 1, i = 0 if from_ is None else from_, j =  self.length if to is None else to
         cdef jvalue val[4]
@@ -1491,31 +1384,14 @@ cdef class JObjectArray(JArray):
         if newType is None: val[off+1].l = NULL
         elif isinstance(newType, JClass):    val[off+1].l = (<JClass>newType).clazz
         elif isinstance(newType, JavaClass): val[off+1].l = get_class(newType)
-        elif isinstance(newType, get_java_class('java.lang.Class')): val[off+1].l = get_object(newType)
-        else: raise TypeError('newType argument must be None, a java.util.Class, or a JavaClass')
-        return jenv().CallStaticObjectMethod(Arrays, m, val, JArray.withgil((j-i)*4))
-    cdef int _fill(self, JEnv env, value, fromIndex=None, toIndex=None) except -1:
-        cdef jmethodID m
-        cdef jsize off = 1, n
-        cdef jvalue val[4]
-        val[0].l = self.arr
-        if fromIndex is None and toIndex is None:
-            m = ObjectArrayDef.fill
-            n = self.length
-        else:
-            off = 3
-            val[1].i = 0 if fromIndex is None else fromIndex
-            val[2].i = self.length if toIndex is None else toIndex
-            m = ObjectArrayDef.fill_r
-            n = val[2].i - val[1].i
-        val[off].l = py2object(env, value, get_object_class(self).component_type)
-        try: return env.CallStaticObjectMethod(Arrays, m, val, JArray.withgil(n*4))
-        finally: env.DeleteLocalRef(val[off].l)
+        elif isinstance(newType, get_java_class(u'java.lang.Class')): val[off+1].l = get_object(newType)
+        else: raise TypeError(u'newType argument must be None, a java.util.Class, or a JavaClass')
+        return jenv().CallStaticObjectMethod(Arrays, m, val, withgil((j-i)*4))
     def sort(self, fromIndex=None, toIndex=None, c=None):
         cdef jobject cmp = NULL
         cdef jmethodID m
         if c is not None:
-            if not isinstance(c, get_java_class('java.util.Comparator')): raise ValueError('c must be a java.util.Comparator')
+            if not isinstance(c, get_java_class(u'java.util.Comparator')): raise ValueError(u'c must be a java.util.Comparator')
             cmp = (<JObject>c.__object__).obj
         cdef jvalue val[4]
         val[0].l = self.arr
@@ -1527,12 +1403,12 @@ cdef class JObjectArray(JArray):
             val[2].i = self.length if toIndex is None else toIndex
             val[3].l = cmp
             m = ObjectArrayDef.sort_r if cmp is NULL else ObjectArrayDef.sort_rc
-        jenv().CallStaticVoidMethod(Arrays, m, val, JArray.withgil(self.length//32))
+        jenv().CallStaticVoidMethod(Arrays, m, val, withgil(self.length//32))
     def binarySearch(self, key, fromIndex=None, toIndex=None, c=None):
         cdef jobject cmp = NULL
         cdef jmethodID m
         if c is not None:
-            if not isinstance(c, get_java_class('java.util.Comparator')): raise ValueError('c must be a java.util.Comparator')
+            if not isinstance(c, get_java_class(u'java.util.Comparator')): raise ValueError(u'c must be a java.util.Comparator')
             cmp = (<JObject>c.__object__).obj
         cdef jsize off = 1
         cdef JEnv env = jenv()
@@ -1549,37 +1425,139 @@ cdef class JObjectArray(JArray):
         val[off+1].l = cmp
         try: return env.CallStaticIntMethod(Arrays, m, val, True)
         finally: env.DeleteLocalRef(val[off+0].l)
-    cdef inline hash(self, bint deep=True):
-        cdef jmethodID m = ObjectArrayDef.deepHashCode if deep else ObjectArrayDef.hashCode
-        cdef jvalue val
-        val.l = self.arr
-        return jenv().CallStaticIntMethod(Arrays, m, &val, JArray.withgil(self.length//16))
-    def __hash__(self): return self.hash(True)
-    def hashCode(self, bint deep=True): return self.hash(deep)
-    cdef inline eqls(self, JObjectArray other, bint deep=True):
-        cdef jmethodID m = ObjectArrayDef.deepEquals if deep else ObjectArrayDef.equals
-        cdef jvalue val[2]
-        val[0].l = self.arr
-        val[1].l = other.arr
-        return jenv().CallStaticBooleanMethod(Arrays, m, val, JArray.withgil(self.length//16))
+    def __hash__(self): return objarr_hash(self.arr, self.length, True)
+    def hashCode(self, bint deep=True): return objarr_hash(self.arr, self.length, deep)
     def __richcmp__(self, other, int op):
         if op != 2 and op != 3 or not isinstance(other, JObjectArray): return NotImplemented
-        cdef bint eq = self.eqls(other, True)
+        cdef JObjectArray o = other
+        eq = objarr_eqls(self.arr, self.length, o.arr, o.length, True)
         return eq if op == 2 else not eq
     def equals(self, other, bint deep=True):
-        if not isinstance(other, JObjectArray): raise ValueError('Can only compare two object arrays')
-        return self.eqls(other, deep)
-    cdef inline unicode str(self, bint deep):
-        cdef jvalue val
-        val.l = self.arr
-        cdef jmethodID m = ObjectArrayDef.deepToString if deep else ObjectArrayDef.toString
-        return jenv().CallStaticObjectMethod(Arrays, m, &val, JArray.withgil(self.length//32))
-    def toString(self, bint deep=True): return self.str(deep)
+        if not isinstance(other, JObjectArray): raise ValueError(u'Can only compare two object arrays')
+        cdef JObjectArray o = other
+        return objarr_eqls(self.arr, self.length, o.arr, o.length, deep)
+    def toString(self, bint deep=True): return objarr_str(self.arr, self.length, deep)
     IF PY_VERSION < PY_VERSION_3:
-        def __unicode__(self): return self.str(True)
-        def __str__(self): return utf8(self.str(True))
+        def __unicode__(self): return objarr_str(self.arr, self.length, True)
+        def __str__(self): return utf8(objarr_str(self.arr, self.length, True))
     ELSE:
-        def __str__(self): return self.str(True)
+        def __str__(self): return objarr_str(self.arr, self.length, True)
+
+########## Object Array Utilities ##########
+cdef list tolist_prim(JEnv env, jarray arr, JClass prim):
+    cdef char pn = prim.funcs.sig
+    cdef jsize n = env.GetArrayLength(arr)
+    cdef jboolean isCopy
+    cdef void *ptr = env.GetPrimitiveArrayCritical(arr, &isCopy)
+    try:
+        if pn == b'Z': return tolist[jboolean](<jboolean*>ptr, 0, n)
+        if pn == b'B': return tolist[jbyte   ](<jbyte*>   ptr, 0, n)
+        if pn == b'C': return tolist[jchar   ](<jchar*>   ptr, 0, n)
+        if pn == b'S': return tolist[jshort  ](<jshort*>  ptr, 0, n)
+        if pn == b'I': return tolist[jint    ](<jint*>    ptr, 0, n)
+        if pn == b'L': return tolist[jlong   ](<jlong*>   ptr, 0, n)
+        if pn == b'F': return tolist[jfloat  ](<jfloat*>  ptr, 0, n)
+        if pn == b'D': return tolist[jdouble ](<jdouble*> ptr, 0, n)
+    finally: env.ReleasePrimitiveArrayCritical(arr, ptr, JNI_ABORT if isCopy else 0)
+cdef list tolist_deep(JEnv env, jobjectArray arr, jsize start, jsize stop):
+    cdef jobject obj
+    cdef JClass clazz
+    cdef jsize i, n = stop-start
+    cdef list out = PyList_New(n)
+    for i in xrange(n):
+        obj = env.GetObjectArrayElement(arr, start+i)
+        clazz = JClass.get(env, env.GetObjectClass(obj))
+        x = (object2py(obj) if not clazz.is_array() else
+             tolist_prim(env, <jarray>obj, clazz.component_type) if clazz.component_type.is_primitive() else
+             tolist_deep(env, <jobjectArray>obj, 0, env.GetArrayLength(<jarray>obj)))
+        Py_INCREF(x)
+        PyList_SET_ITEM(out, i, x)
+    return out
+cdef list tolist_shallow(JEnv env, jobjectArray arr, jsize start, jsize stop):
+    cdef jsize i, n = stop-start
+    cdef list out = PyList_New(n)
+    for i in xrange(n):
+        x = object2py(env.GetObjectArrayElement(arr, start+i))
+        Py_INCREF(x)
+        PyList_SET_ITEM(out, i, x)
+    return out
+cdef int objarr_set_from_ja(JObjectArray self, JEnv env, JArray arr, jsize i, jsize n):
+    """Copy n elements from another Java array to index i in this array."""
+    if arr.length != n: raise ValueError(u'can only set from same-sized Java array')
+    arraycopy(env, arr.arr, 0, self.arr, i, n)
+    return 0
+cdef int objarr_set_from_seq(JObjectArray self, JEnv env, seq, jsize i, jsize n) except -1:
+    """Copy n elements from a sequence-like object to index i in this array."""
+    if len(seq) != n: raise ValueError(u'can only set from same-sized sequence')
+    cdef JClass clazz = get_object_class(self).component_type
+    cdef jobjectArray arr = <jobjectArray>self.arr
+    cdef jobject obj
+    for i,val in enumerate(seq,i):
+        obj = py2object(env, val, clazz)
+        try: env.SetObjectArrayElement(arr, i, obj)
+        finally: env.DeleteLocalRef(obj)
+    return 0
+cdef inline jsize elem_eq(JNIEnv* env, jobject a, jobject b) nogil:
+    """
+    Calls a.equals(b) and deletes the local reference to b. Returns JNI_TRUE or JNI_FALSE for the
+    result of equals and -1 if there was a Java exception.
+    """
+    cdef jvalue val
+    val.l = b
+    cdef jboolean out = env[0].CallBooleanMethodA(env, a, ObjectDef.equals, &val)
+    env[0].DeleteLocalRef(env, b)
+    return -1 if env[0].ExceptionCheck(env) else out
+cdef jsize objarr_find(JObjectArray self, val, jsize start, jsize stop) except -2:
+    cdef JEnv _env = jenv()
+    cdef JNIEnv* env = _env.env
+    cdef jobject obj, valobj = py2object(_env, val, get_object_class(self).component_type)
+    cdef jsize i, out = -1, n = stop-start, eq
+    cdef PyThreadState* gilstate = NULL if withgil(n//16) else PyEval_SaveThread()
+    cdef jobjectArray arr = <jobjectArray>self.arr
+    for i in xrange(start,stop):
+        obj = env[0].GetObjectArrayElement(env, arr, i)
+        if env[0].ExceptionCheck(env) == JNI_TRUE: break
+        eq = elem_eq(env, valobj, obj)
+        if eq == JNI_TRUE: out = i; break
+        elif eq != JNI_FALSE: break
+    if gilstate is not NULL: PyEval_RestoreThread(gilstate)
+    try: _env.check_exc()
+    finally: _env.DeleteLocalRef(valobj)
+    return out
+cdef int objarr_fill(JObjectArray self, JEnv env, value, fromIndex=None, toIndex=None) except -1:
+    cdef jmethodID m
+    cdef jsize off = 1, n
+    cdef jvalue val[4]
+    val[0].l = self.arr
+    if fromIndex is None and toIndex is None:
+        m = ObjectArrayDef.fill
+        n = self.length
+    else:
+        off = 3
+        val[1].i = 0 if fromIndex is None else fromIndex
+        val[2].i = self.length if toIndex is None else toIndex
+        m = ObjectArrayDef.fill_r
+        n = val[2].i - val[1].i
+    val[off].l = py2object(env, value, get_object_class(self).component_type)
+    try: return env.CallStaticObjectMethod(Arrays, m, val, withgil(n*4))
+    finally: env.DeleteLocalRef(val[off].l)
+cdef inline objarr_hash(jarray arr, jsize length, bint deep=True):
+    cdef jmethodID m = ObjectArrayDef.deepHashCode if deep else ObjectArrayDef.hashCode
+    cdef jvalue val
+    val.l = arr
+    return jenv().CallStaticIntMethod(Arrays, m, &val, withgil(length//16))
+cdef inline objarr_eqls(jarray arr, jsize length, jarray other, jsize other_length, bint deep=True):
+    if length != other_length: return False
+    cdef jmethodID m = ObjectArrayDef.deepEquals if deep else ObjectArrayDef.equals
+    cdef jvalue val[2]
+    val[0].l = arr
+    val[1].l = other
+    return jenv().CallStaticBooleanMethod(Arrays, m, val, withgil(length//16))
+cdef inline unicode objarr_str(jarray arr, jsize length, bint deep):
+    cdef jvalue val
+    val.l = arr
+    cdef jmethodID m = ObjectArrayDef.deepToString if deep else ObjectArrayDef.toString
+    return jenv().CallStaticObjectMethod(Arrays, m, &val, withgil(length//32))
 
 
 ########## Object Array Definitions ##########
@@ -1596,34 +1574,114 @@ cdef JObjectArrayDef ObjectArrayDef
 
 
 ########## Public Functions ##########
-def boolean_array(*args): return JPrimitiveArray.create(args, get_java_class('[Z'), &jpad_boolean)
-def byte_array   (*args): return JPrimitiveArray.create(args, get_java_class('[B'), &jpad_byte)
-def char_array   (*args): return JPrimitiveArray.create(args, get_java_class('[C'), &jpad_char)
-def short_array  (*args): return JPrimitiveArray.create(args, get_java_class('[S'), &jpad_short)
-def int_array    (*args): return JPrimitiveArray.create(args, get_java_class('[I'), &jpad_int)
-def long_array   (*args): return JPrimitiveArray.create(args, get_java_class('[J'), &jpad_long)
-def float_array  (*args): return JPrimitiveArray.create(args, get_java_class('[F'), &jpad_float)
-def double_array (*args): return JPrimitiveArray.create(args, get_java_class('[D'), &jpad_double)
+def boolean_array(*args): return JPrimitiveArray.create(args, get_java_class(u'[Z'), &jpad_boolean)
+def byte_array   (*args): return JPrimitiveArray.create(args, get_java_class(u'[B'), &jpad_byte)
+def char_array   (*args): return JPrimitiveArray.create(args, get_java_class(u'[C'), &jpad_char)
+def short_array  (*args): return JPrimitiveArray.create(args, get_java_class(u'[S'), &jpad_short)
+def int_array    (*args): return JPrimitiveArray.create(args, get_java_class(u'[I'), &jpad_int)
+def long_array   (*args): return JPrimitiveArray.create(args, get_java_class(u'[J'), &jpad_long)
+def float_array  (*args): return JPrimitiveArray.create(args, get_java_class(u'[F'), &jpad_float)
+def double_array (*args): return JPrimitiveArray.create(args, get_java_class(u'[D'), &jpad_double)
 def object_array (*args, type=None):
-    if type is None: type = get_java_class('java.util.Class')
+    if type is None: type = get_java_class(u'java.util.Class')
     return JObjectArray.create(args, type)
 
     
-########## Initialization of Array Definitions ##########
+########## Conversion Functions ##########
+cdef jobject __p2j_conv_bytes(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(byte_array(x)))
+cdef jobject __p2j_conv_bytearray(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(byte_array(x)))
+cdef jobject __p2j_conv_boolean_array(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(boolean_array(x)))
+cdef jobject __p2j_conv_byte_array(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(byte_array(x)))
+cdef jobject __p2j_conv_char_array(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(char_array(x)))
+cdef jobject __p2j_conv_short_array(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(short_array(x)))
+cdef jobject __p2j_conv_int_array(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(int_array(x)))
+cdef jobject __p2j_conv_long_array(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(long_array(x)))
+cdef jobject __p2j_conv_float_array(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(float_array(x)))
+cdef jobject __p2j_conv_double_array(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(double_array(x)))
+
+cdef P2JConvert p2j_conv_bytes, p2j_conv_bytearray
+cdef P2JConvert p2j_conv_boolean_array, p2j_conv_byte_array, p2j_conv_char_array, p2j_conv_short_array
+cdef P2JConvert p2j_conv_int_array, p2j_conv_long_array, p2j_conv_float_array, p2j_conv_double_array
+
+cdef P2JConvert p2j_check_bytes(JEnv env, object x, JClass p, P2JQuality* q): return p2j_conv_bytes
+cdef P2JConvert p2j_check_bytearray(JEnv env, object x, JClass p, P2JQuality* q): return p2j_conv_bytearray
+
+cdef P2JConvert p2j_check_chararr(JEnv env, object x, JClass p, P2JQuality* q): q[0] = GREAT; return p2j_conv_char_array
+cdef JPrimArrayDef* _p2j_check_array(JClass p, P2JQuality* q):
+    if not p.is_array() or not p.component_type.is_primitive(): q[0] = FAIL; return NULL
+    cdef char pn = p.component_type.funcs.sig
+    for i in xrange(8):
+        if pn == jpads[i].sig: return jpads[i]
+    q[0] = FAIL
+    return NULL
+cdef P2JConvert _p2j_array_conv(JPrimArrayDef* jpad):
+    if jpad.sig == b'Z': return p2j_conv_boolean_array
+    if jpad.sig == b'B': return p2j_conv_byte_array
+    if jpad.sig == b'C': return p2j_conv_char_array
+    if jpad.sig == b'S': return p2j_conv_short_array
+    if jpad.sig == b'I': return p2j_conv_int_array
+    if jpad.sig == b'L': return p2j_conv_long_array
+    if jpad.sig == b'F': return p2j_conv_float_array
+    if jpad.sig == b'D': return p2j_conv_double_array
+cdef P2JConvert p2j_check_array(JEnv env, object x, JClass p, P2JQuality* q):
+    cdef Py_ssize_t i
+    if p.name == u'java.lang.Object':
+        for i in xrange(8):
+            if x.itemsize == jpads[i].itemsize and x.typecode in jpads[i].array_typecodes:
+                q[0] = GREAT
+                return _p2j_array_conv(jpads[i])
+        q[0] = FAIL
+        return None
+    cdef JPrimArrayDef* jpad = _p2j_check_array(p, q)
+    if jpad is NULL: return None
+    if not check_arrayarray(x, jpad): q[0] = FAIL; return None
+    q[0] = GOOD if x.typecode == u'B' and p.component_type.funcs.sig != b'B' else PERFECT
+    return _p2j_array_conv(jpad)
+cdef P2JConvert p2j_check_buffer(JEnv env, object x, JClass p, P2JQuality* q):
+    if not PyObject_CheckBuffer(x): q[0] = FAIL; return None
+    cdef Py_ssize_t i, itmsz
+    cdef Py_buffer buf
+    cdef bytes format
+    cdef bint native_bo
+    if p.name == u'java.lang.Object':
+        try:
+            PyObject_GetBuffer(x, &buf, PyBUF_ND|PyBUF_FORMAT|PyBUF_SIMPLE)
+            try:
+                itmsz, format, native_bo = get_buffer_info(&buf)
+                if buf.ndim > 1 or not native_bo: q[0] = FAIL; return None
+            finally: PyBuffer_Release(&buf)
+            for i in xrange(8):
+                if itmsz == jpads[i].itemsize and format in jpads[i].buffer_formats:
+                    q[0] = GREAT
+                    return _p2j_array_conv(jpads[i])
+        except Exception: pass
+        q[0] = FAIL
+        return None
+    cdef JPrimArrayDef* jpad = _p2j_check_array(p, q)
+    if jpad is NULL: return None
+    if not get_buffer(x, jpad, &buf, False): q[0] = FAIL; return None
+    q[0] = GOOD if (buf.format is NULL or bytes(buf.format).endswith(b'B')) and p.component_type.funcs.sig != b'B' else PERFECT
+    PyBuffer_Release(&buf)
+    return _p2j_array_conv(jpad)
+
+    
+########## Initialization of Array Definitions and Conversions ##########
 cdef int init_array(JEnv env) except -1:
     # java.util.Arrays utility class
     global Arrays
-    cdef jclass clazz = env.FindClass('java/util/Arrays')
+    cdef jclass clazz = env.FindClass(u'java/util/Arrays')
     Arrays = env.NewGlobalRef(clazz)
     env.DeleteLocalRef(clazz)
 
     # array.array templates
     import array
     global array_templates_bool, array_templates_char, array_templates_int, array_templates_fp
-    array_templates_bool = [array.array(tc) for tc in array_typecodes_bool]
-    array_templates_char = [array.array(tc) for tc in array_typecodes_char]
-    array_templates_int  = [array.array(tc) for tc in array_typecodes_int]
-    array_templates_fp   = [array.array(tc) for tc in array_typecodes_fp]
+    
+    # TODO: does this still work in Python 2?
+    array_templates_bool = [array.array(chr(tc)) for tc in array_typecodes_bool]
+    array_templates_char = [array.array(chr(tc)) for tc in array_typecodes_char]
+    array_templates_int  = [array.array(chr(tc)) for tc in array_typecodes_int]
+    array_templates_fp   = [array.array(chr(tc)) for tc in array_typecodes_fp]
 
     # Primitive array definitions
     create_JPAD[jboolean](env, &jpad_boolean, <jboolean>0, PT_Boolean, b'Z', JEnv.NewBooleanArray,
@@ -1654,40 +1712,40 @@ cdef int init_array(JEnv env) except -1:
     jpads[4] = &jpad_int; jpads[5] = &jpad_long; jpads[6] = &jpad_float; jpads[7] = &jpad_double
         
     # Object array utilities
-    ObjectArrayDef.copyOf         = env.GetStaticMethodID(Arrays, 'copyOf', '([Ljava/lang/Object;I)[Ljava/lang/Object;')
-    ObjectArrayDef.copyOf_nt      = env.GetStaticMethodID(Arrays, 'copyOf', '([Ljava/lang/Object;ILjava/lang/Class;)[Ljava/lang/Object;')
-    ObjectArrayDef.copyOfRange    = env.GetStaticMethodID(Arrays, 'copyOfRange', '([Ljava/lang/Object;II)[Ljava/lang/Object;')
-    ObjectArrayDef.copyOfRange_nt = env.GetStaticMethodID(Arrays, 'copyOfRange', '([Ljava/lang/Object;IILjava/lang/Class;)[Ljava/lang/Object;')
-    ObjectArrayDef.fill    = env.GetStaticMethodID(Arrays, 'fill', '([Ljava/lang/Object;Ljava/lang/Object;)V')
-    ObjectArrayDef.fill_r  = env.GetStaticMethodID(Arrays, 'fill', '([Ljava/lang/Object;IILjava/lang/Object;)V')
-    ObjectArrayDef.sort    = env.GetStaticMethodID(Arrays, 'sort', '([Ljava/lang/Object;)V')
-    ObjectArrayDef.sort_r  = env.GetStaticMethodID(Arrays, 'sort', '([Ljava/lang/Object;II)V')
-    ObjectArrayDef.sort_c  = env.GetStaticMethodID(Arrays, 'sort', '([Ljava/lang/Object;Ljava/util/Comparator;)V')
-    ObjectArrayDef.sort_rc = env.GetStaticMethodID(Arrays, 'sort', '([Ljava/lang/Object;IILjava/util/Comparator;)V')
-    ObjectArrayDef.binarySearch    = env.GetStaticMethodID(Arrays, 'binarySearch', '([Ljava/lang/Object;Ljava/lang/Object;)I')
-    ObjectArrayDef.binarySearch_r  = env.GetStaticMethodID(Arrays, 'binarySearch', '([Ljava/lang/Object;IILjava/lang/Object;)I')
-    ObjectArrayDef.binarySearch_c  = env.GetStaticMethodID(Arrays, 'binarySearch', '([Ljava/lang/Object;Ljava/lang/Object;Ljava/util/Comparator;)I')
-    ObjectArrayDef.binarySearch_rc = env.GetStaticMethodID(Arrays, 'binarySearch', '([Ljava/lang/Object;IILjava/lang/Object;Ljava/util/Comparator;)I')
-    ObjectArrayDef.equals       = env.GetStaticMethodID(Arrays, 'equals',       '([Ljava/lang/Object;[Ljava/lang/Object;)Z')
-    ObjectArrayDef.deepEquals   = env.GetStaticMethodID(Arrays, 'deepEquals',   '([Ljava/lang/Object;[Ljava/lang/Object;)Z')
-    ObjectArrayDef.hashCode     = env.GetStaticMethodID(Arrays, 'hashCode',     '([Ljava/lang/Object;)I')
-    ObjectArrayDef.deepHashCode = env.GetStaticMethodID(Arrays, 'deepHashCode', '([Ljava/lang/Object;)I')
-    ObjectArrayDef.toString     = env.GetStaticMethodID(Arrays, 'toString',     '([Ljava/lang/Object;)Ljava/lang/String;')
-    ObjectArrayDef.deepToString = env.GetStaticMethodID(Arrays, 'deepToString', '([Ljava/lang/Object;)Ljava/lang/String;')
+    ObjectArrayDef.copyOf         = env.GetStaticMethodID(Arrays, u'copyOf', u'([Ljava/lang/Object;I)[Ljava/lang/Object;')
+    ObjectArrayDef.copyOf_nt      = env.GetStaticMethodID(Arrays, u'copyOf', u'([Ljava/lang/Object;ILjava/lang/Class;)[Ljava/lang/Object;')
+    ObjectArrayDef.copyOfRange    = env.GetStaticMethodID(Arrays, u'copyOfRange', u'([Ljava/lang/Object;II)[Ljava/lang/Object;')
+    ObjectArrayDef.copyOfRange_nt = env.GetStaticMethodID(Arrays, u'copyOfRange', u'([Ljava/lang/Object;IILjava/lang/Class;)[Ljava/lang/Object;')
+    ObjectArrayDef.fill    = env.GetStaticMethodID(Arrays, u'fill', u'([Ljava/lang/Object;Ljava/lang/Object;)V')
+    ObjectArrayDef.fill_r  = env.GetStaticMethodID(Arrays, u'fill', u'([Ljava/lang/Object;IILjava/lang/Object;)V')
+    ObjectArrayDef.sort    = env.GetStaticMethodID(Arrays, u'sort', u'([Ljava/lang/Object;)V')
+    ObjectArrayDef.sort_r  = env.GetStaticMethodID(Arrays, u'sort', u'([Ljava/lang/Object;II)V')
+    ObjectArrayDef.sort_c  = env.GetStaticMethodID(Arrays, u'sort', u'([Ljava/lang/Object;Ljava/util/Comparator;)V')
+    ObjectArrayDef.sort_rc = env.GetStaticMethodID(Arrays, u'sort', u'([Ljava/lang/Object;IILjava/util/Comparator;)V')
+    ObjectArrayDef.binarySearch    = env.GetStaticMethodID(Arrays, u'binarySearch', u'([Ljava/lang/Object;Ljava/lang/Object;)I')
+    ObjectArrayDef.binarySearch_r  = env.GetStaticMethodID(Arrays, u'binarySearch', u'([Ljava/lang/Object;IILjava/lang/Object;)I')
+    ObjectArrayDef.binarySearch_c  = env.GetStaticMethodID(Arrays, u'binarySearch', u'([Ljava/lang/Object;Ljava/lang/Object;Ljava/util/Comparator;)I')
+    ObjectArrayDef.binarySearch_rc = env.GetStaticMethodID(Arrays, u'binarySearch', u'([Ljava/lang/Object;IILjava/lang/Object;Ljava/util/Comparator;)I')
+    ObjectArrayDef.equals       = env.GetStaticMethodID(Arrays, u'equals',       u'([Ljava/lang/Object;[Ljava/lang/Object;)Z')
+    ObjectArrayDef.deepEquals   = env.GetStaticMethodID(Arrays, u'deepEquals',   u'([Ljava/lang/Object;[Ljava/lang/Object;)Z')
+    ObjectArrayDef.hashCode     = env.GetStaticMethodID(Arrays, u'hashCode',     u'([Ljava/lang/Object;)I')
+    ObjectArrayDef.deepHashCode = env.GetStaticMethodID(Arrays, u'deepHashCode', u'([Ljava/lang/Object;)I')
+    ObjectArrayDef.toString     = env.GetStaticMethodID(Arrays, u'toString',     u'([Ljava/lang/Object;)Ljava/lang/String;')
+    ObjectArrayDef.deepToString = env.GetStaticMethodID(Arrays, u'deepToString', u'([Ljava/lang/Object;)Ljava/lang/String;')
 
     # Array classes
-    Object = get_java_class('java.lang.Object')
+    Object = get_java_class(u'java.lang.Object')
     class BooleanArray(JPrimitiveArray, Object):
         """The type for Java boolean[] objects"""
-        __java_class_name__ = '[Z'
+        __java_class_name__ = u'[Z'
         def __new__(cls, *args): return JPrimitiveArray.create(args, cls, &jpad_boolean)
     class ByteArray(JPrimitiveArray, Object):
         """The type for Java byte[] objects"""
-        __java_class_name__ = '[B'
+        __java_class_name__ = u'[B'
         def __new__(cls, *args): return JPrimitiveArray.create(args, cls, &jpad_byte)
     class CharArray(JPrimitiveArray, Object):
         """The type for Java char[] objects"""
-        __java_class_name__ = '[C'
+        __java_class_name__ = u'[C'
         def __new__(cls, *args): return JPrimitiveArray.create(args, cls, &jpad_char)
         def tounicode(self, errors=None):
             cdef const char* errs
@@ -1696,35 +1754,60 @@ cdef int init_array(JEnv env) except -1:
             elif PyUnicode_Check(errors):
                 errors = PyUnicode_AsASCIIString(errors)
                 errs = PyBytes_AS_STRING(errors)
-            else: raise TypeError('errors')
+            else: raise TypeError(u'errors')
             cdef JPrimArrayPointer ptr = JPrimArrayPointer(jenv(), self)
             return PyUnicode_DecodeUTF16(<char*>ptr.ptr, (<JPrimitiveArray>self).length*sizeof(jchar), errs, NULL)
     class ShortArray(JPrimitiveArray, Object):
         """The type for Java short[] objects"""
-        __java_class_name__ = '[S'
+        __java_class_name__ = u'[S'
         def __new__(cls, *args): return JPrimitiveArray.create(args, cls, &jpad_short)
     class IntArray(JPrimitiveArray, Object):
         """The type for Java int[] objects"""
-        __java_class_name__ = '[I'
+        __java_class_name__ = u'[I'
         def __new__(cls, *args): return JPrimitiveArray.create(args, cls, &jpad_int)
     class LongArray(JPrimitiveArray, Object):
         """The type for Java long[] objects"""
-        __java_class_name__ = '[J'
+        __java_class_name__ = u'[J'
         def __new__(cls, *args): return JPrimitiveArray.create(args, cls, &jpad_long)
     class FloatArray(JPrimitiveArray, Object):
         """The type for Java float[] objects"""
-        __java_class_name__ = '[F'
+        __java_class_name__ = u'[F'
         def __new__(cls, *args): return JPrimitiveArray.create(args, cls, &jpad_float)
     class DoubleArray(JPrimitiveArray, Object):
         """The type for Java double[] objects"""
-        __java_class_name__ = '[D'
+        __java_class_name__ = u'[D'
         def __new__(cls, *args): return JPrimitiveArray.create(args, cls, &jpad_double)
     from collections import MutableSequence
     MutableSequence.register(JPrimitiveArray)
     MutableSequence.register(JObjectArray)
+    
+    # Add converters
+    global p2j_conv_bytes, p2j_conv_bytearray
+    global p2j_conv_boolean_array, p2j_conv_byte_array, p2j_conv_char_array, p2j_conv_short_array
+    global p2j_conv_int_array, p2j_conv_long_array, p2j_conv_float_array, p2j_conv_double_array
+    p2j_conv_bytes         = P2JConvert.create_cy(__p2j_conv_bytes)
+    p2j_conv_bytearray     = P2JConvert.create_cy(__p2j_conv_bytearray)
+    p2j_conv_boolean_array = P2JConvert.create_cy(__p2j_conv_boolean_array)
+    p2j_conv_byte_array    = P2JConvert.create_cy(__p2j_conv_byte_array)
+    p2j_conv_char_array    = P2JConvert.create_cy(__p2j_conv_char_array)
+    p2j_conv_short_array   = P2JConvert.create_cy(__p2j_conv_short_array)
+    p2j_conv_int_array     = P2JConvert.create_cy(__p2j_conv_int_array)
+    p2j_conv_long_array    = P2JConvert.create_cy(__p2j_conv_long_array)
+    p2j_conv_float_array   = P2JConvert.create_cy(__p2j_conv_float_array)
+    p2j_conv_double_array  = P2JConvert.create_cy(__p2j_conv_double_array)    
+    reg_conv_cy(env, unicode,     u'[C', p2j_check_chararr)
+    reg_conv_cy(env, bytes,       u'[B', p2j_check_bytes)
+    reg_conv_cy(env, bytearray,   u'[B', p2j_check_bytearray)
+    #IF JNI_VERSION >= JNI_VERSION_1_4:
+    #    reg_conv_cy(env, bytes,     u'java.nio.ByteBuffer', p2j_check_bytes2bbuf)
+    #    reg_conv_cy(env, bytearray, u'java.nio.ByteBuffer', p2j_check_bytes2bbuf)
+    reg_conv_cy(env, array.array, None, p2j_check_array)
+    reg_conv_cy(env, None,        None, p2j_check_buffer)
+   
 cdef int dealloc_array(JEnv env) except -1:
     global Arrays
     if Arrays is not NULL: env.DeleteGlobalRef(Arrays)
     Arrays = NULL
-JVM.add_init_hook(init_array)
-JVM.add_dealloc_hook(dealloc_array)
+
+jvm_add_init_hook(init_array, 5)
+jvm_add_dealloc_hook(dealloc_array, 5)

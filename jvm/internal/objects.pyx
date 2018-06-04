@@ -24,9 +24,10 @@ classes and interfaces to make them more Python-like.
 
 Public functions:
     get_java_class - gets a JavaClass from a unicode string
+    java_class     - class decorator for defining Java Class templates
 
 Public classes:
-    JavaClass         - the type of all Java objects, roughly a java.lang.Class
+    JavaClass         - the type of all Java objects, not a replacement for java.lang.Class
     JavaMethods       - wrapper for a collection of same-named Java methods of an object
     JavaStaticMethods - wrapper for a collection of same-named Java static methods of a class
     JavaMethod        - wrapper for a single Java method of an object
@@ -43,10 +44,26 @@ TODO:
     inner classes automatically know the outer class instance and incorporate it into the constructor
 """
 
+from __future__ import absolute_import
+
+include "version.pxi"
+
 from cpython.ref cimport Py_INCREF
-from cpython.tuple cimport PyTuple_New, PyTuple_SET_ITEM
-from cpython.bytes cimport PyBytes_Check
-from cpython.slice cimport PySlice_Check
+from cpython.tuple  cimport PyTuple_New, PyTuple_SET_ITEM
+from cpython.number cimport PyNumber_Index
+from cpython.bytes  cimport PyBytes_Check
+from cpython.slice  cimport PySlice_Check
+
+from .utils cimport to_unicode, KEYS
+
+from .jni cimport jclass, jobject, jfieldID, jvalue, jstring, jint
+
+from .core cimport JClass, JObject, JMethod, JField, JEnv, jenv, SystemDef, ObjectDef, protection_prefix
+from .core cimport jvm_add_init_hook, jvm_add_dealloc_hook
+from .convert cimport P2JQuality, FAIL, P2JConvert, p2j_lookup, p2j_prim_lookup, p2j_obj_lookup
+from .convert cimport select_method, conv_method_args, conv_method_args_single, free_method_args
+from .arrays cimport JObjectArray
+from .packages cimport add_class_to_packages
 
 cdef dict classes = None # class-name (using . and without L;) -> JavaClass
 cpdef get_java_class(unicode classname):
@@ -55,30 +72,17 @@ cpdef get_java_class(unicode classname):
     return JavaClass.__new__(JavaClass, classname, (), {'__java_class_name__':classname})
 cdef create_java_object(jobject obj):
     """Creates a Java Object wrapper around the given object. The object is deleted."""
+    # NOTE: if this function is updated, JEnv.__create_java_object needs to be updated as well
     cdef JEnv env = jenv()
     cdef JClass clazz = JClass.get(env, env.GetObjectClass(obj))
     cdef jfieldID fid
     cls = get_java_class(clazz.name)
     if clazz.is_member() and not clazz.is_static() and clazz.declaring_class is not None:
         try:
-            fid = env.GetFieldID(clazz.clazz, 'this$0', clazz.declaring_class.sig())
+            fid = env.GetFieldID(clazz.clazz, u'this$0', clazz.declaring_class.sig())
             cls = cls._bind_inner_class_to(env.GetObjectField(obj, fid))
         except Exception as ex: pass
     return cls.__new__(cls, JObject.create(env, obj))
-cdef inline JClass get_object_class(obj):
-    """Gets the JClass of an Object"""
-    return type(obj).__jclass__
-cdef inline jclass get_class(cls):
-    """Gets the jclass of a JavaClass"""
-    return (<JClass>cls.__jclass__).clazz
-cdef inline jobject get_object(obj):
-    """Gets the jobject of an Object"""
-    return (<JObject>obj.__object__).obj
-cdef inline jint get_identity(obj):
-    """Gets the identity (hash code) of an Object"""
-    cdef jvalue val
-    val.l = (<JObject>obj.__object__).obj
-    return jenv().CallStaticInt(SystemDef.clazz, SystemDef.identityHashCode, &val)
 
 cdef inline Py_ssize_t tuple_put(tuple t, Py_ssize_t i, x) except -1:
     Py_INCREF(x)
@@ -88,25 +92,44 @@ cdef inline Py_ssize_t tuple_put_class(tuple t, Py_ssize_t i, JClass x) except -
     Py_INCREF(x)
     PyTuple_SET_ITEM(t, i, get_java_class(x.name))
     return i + 1
-    
+
+def java_class(class_name, *bases):
+    """Makes the decorated class a Java Class template with the given class name."""
+    # Mostly inspired from six.add_metaclass
+    def java_class_wrapper(cls):
+        nonlocal bases
+        cls.__java_class_name__ = to_unicode(class_name)
+        attr = cls.__dict__.copy()
+        slots = attr.get('__slots__')
+        if slots is not None:
+            if isinstance(slots, str): slots = [slots]
+            for slots_var in slots: attr.pop(slots_var)
+        attr.pop('__dict__', None)
+        attr.pop('__weakref__', None)
+        if len(bases) == 0 or len(cls.__bases__) != 1 or cls.__bases__[0] != object:
+            bases += cls.__bases__
+        return JavaClass.__new__(JavaClass, cls.__name__, bases, attr)
+    return java_class_wrapper
+
 class JavaClass(type):
     """
     The type of Java objects in Python. This defines lookups for static attributes and
-    constructors. It does not represent a java.lang.Class object directly.
+    constructors. It does *not* represent a java.lang.Class object directly.
 
-    To use it, either be a sub-class of Object or have __metaclass__ = JavaClass in the class
-    definition. In both cases you need the attribute __java_class_name__ which gives the fully
-    qualified clsas name.
+    To use it, either be a sub-class of Object or have the JavaClass metaclass. In both cases
+    you need the attribute __java_class_name__ which gives the fully qualified clsas name. These
+    can be accomplished by using the @java_class decorator. For non-interfaces the base classes
+    must be supplied to the decorator instead of the class itself.
 
     The actual subclasses and interfaces are added as necessary and do not need to be specified
     manually. The superclass is placed in the MRU wherever the Object (or other non-interface
     class) is placed in the MRU.
     """
     def __new__(cls, name, tuple bases, dict attr):
-        if '__java_class_name__' not in attr: raise NameError('Java object classes must define __java_class_name__')
+        if '__java_class_name__' not in attr: raise NameError(u'Java object classes must define __java_class_name__')
         cdef unicode cn = to_unicode(attr['__java_class_name__'])
         del attr['__java_class_name__']
-        if cn in classes: raise TypeError("Class '%s' is already defined"%cn)
+        if cn in classes: raise TypeError(u"Class '%s' is already defined"%cn)
         
         cdef JEnv env = jenv()
         cdef JClass clazz = JClass.named(env, cn)
@@ -121,7 +144,7 @@ class JavaClass(type):
         while c is not None:
             qual_names.append(protection_prefix(c.modifiers) + c.simple_name)
             c = c.declaring_class
-        attr['__qualname__'] = '.'.join(reversed(qual_names))
+        attr['__qualname__'] = u'.'.join(reversed(qual_names))
 
         cdef bint is_objarr = clazz.is_array() and not clazz.component_type.is_primitive()
         cdef bint has_super = s is not None
@@ -133,7 +156,7 @@ class JavaClass(type):
             if not isinstance(b, JavaClass):
                 i = tuple_put(new_bases, i, b)
             elif not (<JClass>b.__jclass__).is_interface():
-                if not has_super: raise TypeError("Invalid base classes for '%s' - two super-classes specified"%cn)
+                if not has_super: raise TypeError(u"Invalid base classes for '%s' - two super-classes specified"%cn)
                 if is_objarr: i = tuple_put(new_bases, i, JObjectArray)
                 i = tuple_put_class(new_bases, i, s)
                 has_super = False
@@ -146,6 +169,8 @@ class JavaClass(type):
         for c in interfaces: i = tuple_put_class(new_bases, i, c)
 
         IF PY_VERSION < PY_VERSION_3: name = utf8(name)
+        if len(new_bases) > 1 and object in new_bases:
+            new_bases = tuple(b for b in new_bases if b != object)
         obj = type.__new__(cls, name, new_bases, attr)
         classes[cn] = obj
         return obj
@@ -170,7 +195,7 @@ class JavaClass(type):
         cdef unicode name = to_unicode(_name)
         if name not in clazz.static_fields: raise AttributeError(name)
         cdef JField field = clazz.static_fields[name]
-        if field.is_final(): raise AttributeError("Can't set final static field")
+        if field.is_final(): raise AttributeError(u"Can't set final static field")
         field.type.funcs.set_static(jenv(), clazz.clazz, field, value)
     def __call__(self, *args):
         """
@@ -179,7 +204,7 @@ class JavaClass(type):
         issues with ambiguous constructors then use [...] on the class to select a constructor.
         """
         cdef JClass clazz = self.__jclass__
-        if clazz.is_abstract(): raise TypeError('Cannot instantiate abstract classes')
+        if clazz.is_abstract(): raise TypeError(u'Cannot instantiate abstract classes')
         if hasattr(self, '__self__'): args = (self.__self__,) + tuple(args)
         cdef JEnv env = jenv()
         cdef jvalue* jargs
@@ -212,13 +237,13 @@ class JavaClass(type):
         try: n = PyNumber_Index(ind)
         except TypeError: pass
         else:
-            if n < 0: raise ValueError('Cannot create negative sized array')
+            if n < 0: raise ValueError(u'Cannot create negative sized array')
             return JObjectArray.new_raw(jenv(), n, clazz)
         if PySlice_Check(ind):
             if ind.start is not None or ind.stop is not None or ind.step is not None:
-                raise ValueError('Slice can only be an empty slice')
+                raise ValueError(u'Slice can only be an empty slice')
             return get_java_class(JObjectArray.get_objarr_classname(clazz))
-        if clazz.is_abstract(): raise TypeError('Cannot instantiate abstract classes')
+        if clazz.is_abstract(): raise TypeError(u'Cannot instantiate abstract classes')
         cdef list ctors = clazz.constructors
         cdef bint bound = hasattr(self, '__self__')
         if ind is Ellipsis:
@@ -230,7 +255,7 @@ class JavaClass(type):
     def __iter__(self):
         """Iterates over the constructors of the class, yielding JavaConstructor objects."""
         cdef JClass clazz = self.__jclass__
-        if clazz.is_abstract(): raise TypeError('Cannot instantiate abstract classes')
+        if clazz.is_abstract(): raise TypeError(u'Cannot instantiate abstract classes')
         cdef JMethod m
         for m in clazz.constructors: yield JavaConstructor(self, m, getattr(self, '__self__', None))
     def __dir__(self):
@@ -245,22 +270,22 @@ class JavaClass(type):
     def __repr__(self):
         cdef JClass clazz = self.__jclass__, c
         cdef Py_ssize_t n
-        if clazz.is_primitive(): return "<Java primitive class '%s'>"%clazz.name
+        if clazz.is_primitive(): return u"<Java primitive class '%s'>"%clazz.name
         if clazz.is_array():
             c = clazz.component_type; n = 1
             while c.is_array(): c = c.component_type; n += 1
-            if n == 1: return "<Java array of '%s'>"%c.name
-            else:      return "<Java %dd array of '%s'>"%(n,c.name)
-        typ = 'enum' if clazz.is_enum() else ('interface' if clazz.is_interface() else 'class')
+            if n == 1: return u"<Java array of '%s'>"%c.name
+            else:      return u"<Java %dd array of '%s'>"%(n,c.name)
+        typ = u'enum' if clazz.is_enum() else (u'interface' if clazz.is_interface() else u'class')
         x = (typ,clazz.name)
-        if clazz.is_anonymous(): return "<Java anonymous %s '%s'>"%x
-        if clazz.is_local():     return "<Java local %s '%s'>"%x
+        if clazz.is_anonymous(): return u"<Java anonymous %s '%s'>"%x
+        if clazz.is_local():     return u"<Java local %s '%s'>"%x
         if clazz.is_member():
-            if clazz.is_static(): return "<Java nested %s '%s'>"%x
-            if not hasattr(self, '__self__'): return "<Java inner %s '%s'>"%x
-            return "<Java inner %s '%s' bound to instance of '%s' at 0x%08x>"%(x+
+            if clazz.is_static(): return u"<Java nested %s '%s'>"%x
+            if not hasattr(self, '__self__'): return u"<Java inner %s '%s'>"%x
+            return u"<Java inner %s '%s' bound to instance of '%s' at 0x%08x>"%(x+
                     (get_object_class(self.__self__).name, get_identity(self.__self__)))
-        return "<Java %s '%s'>"%x
+        return u"<Java %s '%s'>"%x
     def _bind_inner_class_to(self, obj):
         cdef JClass clazz = self.__jclass__
         if (not clazz.is_member() or clazz.is_static() or clazz.declaring_class is None or
@@ -326,7 +351,7 @@ cdef class JavaMethods(object):
         def __get__(self): return tuple((<JMethod>m).sig() for m in self.methods)
     def __repr__(self):
         cdef unicode cname = get_object_class(self.__self__).name, name = self.__name__
-        return ("<Java methods %s.%s of instance at 0x%08x>") % (cname, name, get_identity(self.__self__))
+        return u"<Java methods %s.%s of instance at 0x%08x>" % (cname, name, get_identity(self.__self__))
 cdef class JavaStaticMethods(JavaMethods):
     """
     Like JavaMethods but for a group of static methods. `__self__` is a JavaClass instead of an
@@ -344,7 +369,7 @@ cdef class JavaStaticMethods(JavaMethods):
         finally: free_method_args(env, m, jargs)
     def __repr__(self):
         cdef unicode cname = (<JClass>self.__self__.__jclass__).name, name = self.__name__
-        return "<Java static methods %s.%s>" % (cname, name)
+        return u"<Java static methods %s.%s>" % (cname, name)
 
 cdef class JavaMethod(object):
     """A single Java method."""
@@ -370,7 +395,7 @@ cdef class JavaMethod(object):
     def __repr__(self):
         cdef JClass clazz = get_object_class(self.__self__)
         cdef unicode cname = clazz.name, name = self.method.name, psig = self.method.param_sig()
-        return ("<Java method %s.%s(%s) of instance at 0x%08x>") % (cname, name, psig, get_identity(self.__self__))
+        return u"<Java method %s.%s(%s) of instance at 0x%08x>" % (cname, name, psig, get_identity(self.__self__))
 cdef class JavaStaticMethod(JavaMethod):
     """A single Java static method."""
     # __self__ is a JavaClass
@@ -383,7 +408,7 @@ cdef class JavaStaticMethod(JavaMethod):
     def __repr__(self):
         cdef JClass clazz = self.__self__.__jclass__
         cdef unicode cname = clazz.name, name = self.method.name, psig = self.method.param_sig()
-        return "<Java static method %s.%s(%s)>" % (cname, name, psig)
+        return u"<Java static method %s.%s(%s)>" % (cname, name, psig)
 
 cdef class JavaConstructor(object):
     """A single Java Constructor for a class. Supports being bound to an enclosing class."""
@@ -414,8 +439,8 @@ cdef class JavaConstructor(object):
             return tuple(get_java_class((<JClass>p).name) for p in pt)
     def __repr__(self):
         cdef JClass clazz = self.im_class.__jclass__
-        if self.__self__ is None: return "<Java constructor %s(%s)>" % (clazz.name, self.signature)
-        return "<Java constructor %s(%s) enclosed by %s>" % (clazz.name, self.signature, self.__self__)
+        if self.__self__ is None: return u"<Java constructor %s(%s)>" % (clazz.name, self.signature)
+        return u"<Java constructor %s(%s) enclosed by %s>" % (clazz.name, self.signature, self.__self__)
 
 from contextlib import contextmanager
 @contextmanager
@@ -432,8 +457,8 @@ def synchronized(obj):
             ...
         }
     """
-    if not isinstance(obj, get_java_class('java.lang.Object')):
-        raise ValueError('Can only synchronize on Java objects')
+    if not isinstance(obj, get_java_class(u'java.lang.Object')):
+        raise ValueError(u'Can only synchronize on Java objects')
     cdef JEnv env = jenv()
     cdef jobject o = get_object(obj)
     assert o is not NULL
@@ -446,29 +471,28 @@ def unbox(o):
     Unboxes a Java Object to a primitive. If the given object is not a Java Object or not a
     primitive wrapper, it is returned as-is.
     """
-    if not isinstance(o, get_java_class('java.lang.Object')): return o
+    if not isinstance(o, get_java_class(u'java.lang.Object')): return o
     cdef unicode cn = get_object_class(o).name
-    if   cn == 'java.lang.Boolean':   return o._jcall0('booleanValue')
-    elif cn == 'java.lang.Byte':      return o._jcall0('byteValue')
-    elif cn == 'java.lang.Character': return o._jcall0('charValue')
-    elif cn == 'java.lang.Short':     return o._jcall0('shortValue')
-    elif cn == 'java.lang.Integer':   return o._jcall0('intValue')
-    elif cn == 'java.lang.long':      return o._jcall0('longValue')
-    elif cn == 'java.lang.Float':     return o._jcall0('floatValue')
-    elif cn == 'java.lang.Double':    return o._jcall0('doubleValue')
+    if   cn == u'java.lang.Boolean':   return o._jcall0(u'booleanValue')
+    elif cn == u'java.lang.Byte':      return o._jcall0(u'byteValue')
+    elif cn == u'java.lang.Character': return o._jcall0(u'charValue')
+    elif cn == u'java.lang.Short':     return o._jcall0(u'shortValue')
+    elif cn == u'java.lang.Integer':   return o._jcall0(u'intValue')
+    elif cn == u'java.lang.long':      return o._jcall0(u'longValue')
+    elif cn == u'java.lang.Float':     return o._jcall0(u'floatValue')
+    elif cn == u'java.lang.Double':    return o._jcall0(u'doubleValue')
     else: return o
 
-cdef int init_templates(JEnv env) except -1:
+cdef int init_objects(JEnv env) except -1:
     global classes; classes = dict()
 
     ### Core Classes and Interfaces ###
+    @java_class(u'java.lang.Object')
     class Object(object): # implements collections.Hashable
         """
         The base class of all Java objects. Interfaces are not subclasses of this, but any
         non-interface is.
         """
-        __metaclass__ = JavaClass
-        __java_class_name__ = 'java.lang.Object'
         def __new__(cls, JObject obj, *args):
             if obj is None: raise ValueError()
             o = super(Object, cls).__new__(cls)
@@ -484,7 +508,7 @@ cdef int init_templates(JEnv env) except -1:
                 c = cls.classes.get(name)
                 if c is not None: return get_java_class(c.name)._bind_inner_class_to(self)
                 if name in cls.static_methods or name in cls.static_fields or name in cls.static_classes:
-                    raise AttributeError('Cannot access static members from an instance of the class')
+                    raise AttributeError(u'Cannot access static members from an instance of the class')
                 cls = cls.superclass
             raise AttributeError(name)
         def _jsetattr(self, unicode name, value):
@@ -493,11 +517,11 @@ cdef int init_templates(JEnv env) except -1:
             while c is not None:
                 f = c.fields.get(name)
                 if f is not None:
-                    if f.is_final(): raise AttributeError('Cannot set final field')
+                    if f.is_final(): raise AttributeError(u'Cannot set final field')
                     f.type.funcs.set(jenv(), get_object(self), f, value)
                     return
                 if name in c.static_fields:
-                    raise AttributeError('Cannot set static fields from an instance of the class')
+                    raise AttributeError(u'Cannot set static fields from an instance of the class')
                 if name in c.static_methods or name in c.static_classes or name in c.methods or name in c.classes:
                     raise AttributeError(name)
                 c = c.superclass
@@ -662,99 +686,97 @@ cdef int init_templates(JEnv env) except -1:
         ELSE:
             def __str__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.toString, NULL, True)
         def __repr__(self):
-            return ("<Java instance of '%s' at 0x%08x>") % (get_object_class(self).name, get_identity(self))
+            return u"<Java instance of '%s' at 0x%08x>" % (get_object_class(self).name, get_identity(self))
 
+    @java_class(u'java.lang.AutoCloseable')
     class AutoCloseable(object):
-        __metaclass__ = JavaClass
-        __java_class_name__ = 'java.lang.AutoCloseable'
         def __enter__(self): return self
-        def __exit__(self ,type, value, traceback): self._jcall0('close'); return False
+        def __exit__(self ,type, value, traceback): self._jcall0(u'close'); return False
+    @java_class(u'java.lang.Cloneable')
     class Cloneable(object):
-        __metaclass__ = JavaClass
-        __java_class_name__ = 'java.lang.Cloneable'
         def __copy__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.clone, NULL, True)
+    @java_class(u'java.lang.Comparable')
     class Comparable(object):
-        __metaclass__ = JavaClass
-        __java_class_name__ = 'java.lang.Comparable'
-        def __lt__(self, other): return self._jcall1('compareTo', other) < 0
-        def __gt__(self, other): return self._jcall1('compareTo', other) > 0
-        def __le__(self, other): return self._jcall1('compareTo', other) <= 0
-        def __ge__(self, other): return self._jcall1('compareTo', other) >= 0
-    class String(Object):
+        def __lt__(self, other): return self._jcall1(u'compareTo', other) < 0
+        def __gt__(self, other): return self._jcall1(u'compareTo', other) > 0
+        def __le__(self, other): return self._jcall1(u'compareTo', other) <= 0
+        def __ge__(self, other): return self._jcall1(u'compareTo', other) >= 0
+    @java_class(u'java.lang.String', Object)
+    class String(object):
         # This class template is never usuable since Strings are ALWAYS converted to unicode objects
-        __java_class_name__ = 'java.lang.String'
-        def __getitem__(self, i): return self._jcall1('charAt', i)
-        def __len__(self): return self._jcall0('length')
+        def __getitem__(self, i): return self._jcall1(u'charAt', i)
+        def __len__(self): return self._jcall0(u'length')
         IF PY_VERSION < PY_VERSION_3:
             def __unicode__(self): return jenv().pystr(<jstring>get_object(self), False)
             def __str__(self): return utf8(jenv().pystr(<jstring>get_object(self), False))
         ELSE:
             def __str__(self): return jenv().pystr(<jstring>get_object(self), False)
-    class Enum(Object):
-        __java_class_name__ = 'java.lang.Enum'
-        def __int__(self): return self._jcall0('ordinal')
-        def __long__(self): return self._jcall0('ordinal')
+    @java_class(u'java.lang.Enum', Object)
+    class Enum(object):
+        def __int__(self): return self._jcall0(u'ordinal')
+        def __long__(self): return self._jcall0(u'ordinal')
         def __repr__(self):
-            return ("<Java enum value %s.%s>") % (get_object_class(self).name, self._jcall0('name'))
+            return (u"<Java enum value %s.%s>") % (get_object_class(self).name, self._jcall0(u'name'))
 
 
     ### Exceptions ###
     def cls(cn, base): return JavaClass.__new__(JavaClass, cn, (Object,base), {'__java_class_name__':cn})
-    class Throwable(Object, Exception):
-        __java_class_name__ = 'java.lang.Throwable'
+    @java_class(u'java.lang.Throwable', Object, Exception)
+    class Throwable(object):
         IF PY_VERSION < PY_VERSION_3:
-            def __unicode__(self): return self._jcall0('getLocalizedMessage')
-            def __str__(self): return utf8(self._jcall0('getLocalizedMessage'))
+            def __unicode__(self): return self._jcall0(u'getLocalizedMessage')
+            def __str__(self): return utf8(self._jcall0(u'getLocalizedMessage'))
         ELSE:
-            def __str__(self): return self._jcall0('getLocalizedMessage')
+            def __str__(self): return self._jcall0(u'getLocalizedMessage')
 
     # One-to-one and obvious mappings
-    cls('java.lang.ArithmeticException',      ArithmeticError)
-    cls('java.lang.AssertionError',           AssertionError)
-    cls('java.lang.InterruptedException',     KeyboardInterrupt)
-    cls('java.lang.LinkageError',             ImportError)
-    cls('java.lang.VirtualMachineError',      SystemError)
-    cls('java.lang.OutOfMemoryError',         MemoryError)
-    cls('java.lang.StackOverflowError',       OverflowError)
-    cls('java.lang.IllegalArgumentException', ValueError) # a few others have ValueError as well
-    cls('java.util.NoSuchElementException',   StopIteration)
-    cls('java.io.IOException',                IOError)
-    cls('java.io.IOError',                    IOError)
-    cls('java.io.EOFException',               EOFError)
+    cls(u'java.lang.ArithmeticException',      ArithmeticError)
+    cls(u'java.lang.AssertionError',           AssertionError)
+    cls(u'java.lang.InterruptedException',     KeyboardInterrupt)
+    cls(u'java.lang.LinkageError',             ImportError)
+    cls(u'java.lang.VirtualMachineError',      SystemError)
+    cls(u'java.lang.OutOfMemoryError',         MemoryError)
+    cls(u'java.lang.StackOverflowError',       OverflowError)
+    cls(u'java.lang.IllegalArgumentException', ValueError) # a few others have ValueError as well
+    cls(u'java.util.NoSuchElementException',   StopIteration)
+    cls(u'java.io.IOException',                IOError)
+    cls(u'java.io.IOError',                    IOError)
+    cls(u'java.io.EOFException',               EOFError)
     # NameError
-    cls('java.lang.ClassNotFoundException',  NameError)
-    cls('java.lang.TypeNotPresentException', NameError)
+    cls(u'java.lang.ClassNotFoundException',  NameError)
+    cls(u'java.lang.TypeNotPresentException', NameError)
     # AttributeError
-    cls('java.lang.IllegalAccessException',  AttributeError)
-    cls('java.lang.NoSuchFieldError',        AttributeError)
-    cls('java.lang.NoSuchMethodError',       AttributeError)
+    cls(u'java.lang.IllegalAccessException',  AttributeError)
+    cls(u'java.lang.NoSuchFieldError',        AttributeError)
+    cls(u'java.lang.NoSuchMethodError',       AttributeError)
     # ValueError
-    cls('java.lang.EnumConstantNotPresentException', ValueError)
-    cls('java.lang.NullPointerException',            ValueError)
+    cls(u'java.lang.EnumConstantNotPresentException', ValueError)
+    cls(u'java.lang.NullPointerException',            ValueError)
     # TypeError
-    cls('java.lang.ArrayStoreException',                  TypeError)
-    cls('java.lang.ClassCastException',                   TypeError)
-    cls('java.lang.InstantiationException',               TypeError)
-    cls('java.lang.IllegalStateException',                TypeError)
-    cls('java.lang.UnsupportedOperationException',        TypeError)
-    cls('java.lang.reflect.UndeclaredThrowableException', TypeError)
+    cls(u'java.lang.ArrayStoreException',                  TypeError)
+    cls(u'java.lang.ClassCastException',                   TypeError)
+    cls(u'java.lang.InstantiationException',               TypeError)
+    cls(u'java.lang.IllegalStateException',                TypeError)
+    cls(u'java.lang.UnsupportedOperationException',        TypeError)
+    cls(u'java.lang.reflect.UndeclaredThrowableException', TypeError)
     # IndexError
-    cls('java.lang.IndexOutOfBoundsException',  IndexError)
-    cls('java.lang.NegativeArraySizeException', IndexError)
-    cls('java.util.EmptyStackException',        IndexError)
-    cls('java.nio.BufferOverflowException',     IndexError)
-    cls('java.nio.BufferUnderflowException',    IndexError)
+    cls(u'java.lang.IndexOutOfBoundsException',  IndexError)
+    cls(u'java.lang.NegativeArraySizeException', IndexError)
+    cls(u'java.util.EmptyStackException',        IndexError)
+    cls(u'java.nio.BufferOverflowException',     IndexError)
+    cls(u'java.nio.BufferUnderflowException',    IndexError)
     # UnicodeError
-    cls('java.nio.charset.CharacterCodingException', UnicodeError)
-    cls('java.nio.charset.CoderMalfunctionError',    UnicodeError)
-    cls('java.io.UTFDataFormatException',            UnicodeError)
-    cls('java.io.UnsupportedEncodingException',      UnicodeError)
-    cls('java.io.CharConversionException',           UnicodeError)
+    cls(u'java.nio.charset.CharacterCodingException', UnicodeError)
+    cls(u'java.nio.charset.CoderMalfunctionError',    UnicodeError)
+    cls(u'java.io.UTFDataFormatException',            UnicodeError)
+    cls(u'java.io.UnsupportedEncodingException',      UnicodeError)
+    cls(u'java.io.CharConversionException',           UnicodeError)
 
     return 0
 
-cdef int dealloc_templates(JEnv env) except -1:
+cdef int dealloc_objects(JEnv env) except -1:
     global classes; classes = None; return 0
     # Note: ABCMeta uses a weak reference set for subclass registrations, no need to deregister
-JVM.add_init_hook(init_templates)
-JVM.add_dealloc_hook(dealloc_templates)
+
+jvm_add_init_hook(init_objects, 2)
+jvm_add_dealloc_hook(dealloc_objects, 2)

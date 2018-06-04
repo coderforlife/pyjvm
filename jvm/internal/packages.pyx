@@ -30,7 +30,16 @@ Internal functions:
     get_pkgs_and_classes  - gets the pcakages and classes that are immediately under a package
 """
 
-##########  ##########
+from __future__ import absolute_import
+
+from .utils cimport ITEMS
+
+from .jni cimport jobject, jvalue, jstring, jobjectArray, jint
+
+from .core cimport jvm_add_init_hook, jvm_add_dealloc_hook
+from .core cimport JClass, JEnv, jenv, protection_prefix
+from .core cimport ObjectDef, SystemDef, ClassLoaderDef, URLClassLoaderDef, FileDef, URIDef, PackageDef, ThreadDef
+
 
 def add_class_path(unicode path):
     """Adds a path to the system class loader's class path and update the internal database."""
@@ -39,7 +48,7 @@ def add_class_path(unicode path):
     cdef jobject f, uri
     cdef jvalue val
     try:
-        if not env.IsInstanceOf(scl, URLClassLoaderDef.clazz): raise RuntimeError('System class loader must be a URLClassLoader for add_class_path to work once the JVM has started')
+        if not env.IsInstanceOf(scl, URLClassLoaderDef.clazz): raise RuntimeError(u'System class loader must be a URLClassLoader for add_class_path to work once the JVM has started')
         val.l = env.NewString(path)
         try: f = env.NewObject(FileDef.clazz, FileDef.ctor, &val)
         finally: env.DeleteLocalRef(val.l)
@@ -56,10 +65,10 @@ def add_class_path(unicode path):
     update_packages(allpackages, classes)
 
 cdef add_class_to_packages(unicode classname):
-    """Adds a class to was just loaded to internal database. If it is already there, does nothing."""
-    if len(classname) == 0 or classname[0] == '[': return
+    """Adds a class to the internal database. If it is already there, does nothing."""
+    if len(classname) == 0 or classname[0] == u'[': return
     cdef dict d = allpackages
-    parts = classname.split('.')
+    parts = classname.split(u'.')
     for p in parts[:-1]: d = d.setdefault(p, {})
     d[parts[-1]] = None
         
@@ -82,21 +91,21 @@ def get_pkgs_and_classes(unicode name):
     """
     cdef JEnv env = jenv()
     cdef dict p = allpackages
-    if name != '':
-        for pkg_name in name.split('.'):
+    if name != u'':
+        for pkg_name in name.split(u'.'):
             p = p.setdefault(pkg_name, {})
     packages = set(k for k,v in ITEMS(p) if v is not None)
     classes = {pp:cn for pp,cn in ((get_pp_class_name(env, name, k),k) for k,v in ITEMS(p) if v is None) if pp is not None}
     return packages, classes
 
 cdef unicode get_pp_class_name(JEnv env, unicode pkg, unicode cn):
-    cdef JClass clazz = JClass.named(env, cn if len(pkg) == 0 else '.'.join((pkg, cn)))
+    cdef JClass clazz = JClass.named(env, cn if len(pkg) == 0 else u'.'.join((pkg, cn)))
     return None if clazz.is_nested() else (protection_prefix(clazz.modifiers) + cn)
     
 cdef dict find_all_classnames(JEnv env):
     """
-    Finds all classes that was can and return them in a dictionary where each part of the package
-    name is a key in the dictionary and the value is the next level. Classe names are put in as
+    Finds all classes that we can and return them in a dictionary where each part of the package
+    name is a key in the dictionary and the value is the next level. Class names are put in as
     keys and the value is None.
 
     This can only find classes in JARs/ZIPs and in loose directories. This can only find such
@@ -111,7 +120,7 @@ cdef dict find_all_classnames(JEnv env):
     cdef jobject obj1, obj2
     
     # Get classes from boot class path
-    val.l = env.NewString('sun.boot.class.path')
+    val.l = env.NewString(u'sun.boot.class.path')
     try:
         path = env.pystr(<jstring>env.CallStaticObject(SystemDef.clazz, SystemDef.getProperty, &val))
     except Exception: pass
@@ -139,7 +148,7 @@ cdef update_packages(dict packages, list classes):
     classes.sort() # causes next loop to go much faster due to memory localization
     cdef dict d
     for c in classes:
-        parts = c.split('.')
+        parts = c.split(u'.')
         d = packages
         for p in parts[:-1]: d = d.setdefault(p, {})
         d[parts[-1]] = None
@@ -169,14 +178,14 @@ cdef int process_urlclassloader(JEnv env, jobject cl, list classes) except -1:
             url = env.GetObjectArrayElement(urls, i)
             try: path = env.CallString(url, ObjectDef.toString)
             finally: env.DeleteLocalRef(url)
-            if path.startswith('file:'): process_path_classes(path[5:], classes)
+            if path.startswith(u'file:'): process_path_classes(path[5:], classes)
     finally: env.DeleteLocalRef(urls)
     return 0
 
 cdef int process_path_classes(unicode path, list classes):
     from os.path import isdir, isfile
     if isdir(path): process_dir_classes(path, classes)
-    elif isfile(path) and (path.endswith('.jar') or path.endswith('.zip')):
+    elif isfile(path) and (path.endswith(u'.jar') or path.endswith(u'.zip')):
         process_jar_classes(path, classes)
     return 0
 
@@ -184,21 +193,21 @@ cdef int process_dir_classes(unicode path, list classes) except -1:
     from os import walk
     from os.path import abspath, relpath, join
     for root, dirs, names in walk(abspath(path)):
-        classes.extend(relpath(join(root, n), path)[:-6].replace('/', '.').replace('\\', '.')
-                       for n in names if n.endswith('.class') and '$' not in n)
+        classes.extend(relpath(join(root, n), path)[:-6].replace(u'/', u'.').replace(u'\\', u'.')
+                       for n in names if n.endswith(u'.class') and u'$' not in n)
     return 0
 
 cdef int process_jar_classes(unicode path, list classes) except -1:
     from zipfile import ZipFile, BadZipfile, LargeZipFile
     try:
-        with ZipFile(path, 'r') as zip:
-            classes.extend(n[:-6].replace('/', '.')
-                           for n in zip.namelist() if n.endswith('.class') and '$' not in n)
+        with ZipFile(path, u'r') as zip:
+            classes.extend(n[:-6].replace(u'/', u'.')
+                           for n in zip.namelist() if n.endswith(u'.class') and u'$' not in n)
     except (BadZipfile, LargeZipFile, IOError): pass
     return 0
 
 allpackages = None
 cdef int init_importer(JEnv env) except -1: global allpackages; allpackages = find_all_classnames(env)
 cdef int dealloc_importer(JEnv env) except -1: global allpackages; allpackages = None
-JVM.add_early_init_hook(init_importer)
-JVM.add_dealloc_hook(dealloc_importer)
+jvm_add_init_hook(init_importer, -1)
+jvm_add_dealloc_hook(dealloc_importer, -1)

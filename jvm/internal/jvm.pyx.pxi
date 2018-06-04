@@ -31,29 +31,80 @@ Public classes:
 Internal classes:
     JVM - the core JVM wrapper, wraps a JavaVM*
 
-Internal function types:
-    jvm_hook - the type of functions given to JVM.add_<when>_hook()
+Internal values:
+    jvm - the global, singleton, JVM instance (or None if not yet created)
 
 Internal functions:
-   jvm()  - gets the global, singleton, JVM instance, creating it if necessary
-   jenv() - gets the current thread's JEnv variable, creating it as necessary
-   raise_jni_err(msg, error) - takes a JNI error code and raises an exception is necessary
-   jvm_create()  - creates and returns an uninitialized JVM instance
-   jvm_destroy() - destroys the singleton JVM instance, shuts down the main JVM thread
+    raise_jni_err(msg, error) - takes a JNI error code and raises an exception is necessary
+    jvm_add_init_hook(hook, priority)    - adds a function to call in the initialization process
+        lower priorities run earlier, negative priorities run before JEnv initialization
+    jvm_add_dealloc_hook(hook, priority) - adds a function to call in the destruction process
+        higher priorities run earlier, working in reverse from initialization hooks
+    jvm_create()  - creates and returns an uninitialized JVM instance
+    jvm_destroy() - destroys the singleton JVM instance, shuts down the main JVM thread
+
+Internal function types:
+    jvm_hook - the type of functions given to jvm_add_<when>_hook()
 
 FUTURE:
     hook JVM exit and abort?
 """
 
+#from __future__ import absolute_import
+
+include "version.pxi"
+
+DEF MAX_HOOKS=16
 
 from libc.stdlib cimport malloc, free
+from libc.string cimport memmove
+
+from .utils cimport str_ptr
+from .unicode cimport any_to_utf8j, from_utf8j
+
+from .jni cimport JNI_GetCreatedJavaVMs, JNI_CreateJavaVM, JNI_GetDefaultJavaVMInitArgs
+from .jni cimport JavaVMOption, JavaVMInitArgs, JavaVMAttachArgs
+from .jni cimport JNI_OK, JNI_EDETACHED, JNI_EVERSION, JNI_ENOMEM, JNI_EEXIST, JNI_EINVAL
+from .jni cimport jint, jsize
+
 
 ########## JVM init/dealloc hooks ##########
-ctypedef int (*jvm_hook)(JEnv env) except -1
-cdef int __n_early_init_hooks = 0, __n_init_hooks = 0, __n_dealloc_hooks = 0
-cdef jvm_hook __early_init_hooks[16]
-cdef jvm_hook __init_hooks[16]
-cdef jvm_hook __dealloc_hooks[16]
+# Current hooks and their priorities are:
+#   def         -10  (jref)
+#   jclasses    -8   (jref)
+#   boxes       -7   (jref)
+#   importer    -1   (packages)
+#   jcf          1   (jref)
+#   objects      2
+#   p2j          3   (convert)
+#   array        5
+#   numbers     10
+#   collections 11
+cdef int __n_init_hooks = 0, __n_dealloc_hooks = 0
+cdef jvm_hook __init_hooks[MAX_HOOKS]
+cdef int __init_hooks_pris[MAX_HOOKS]
+cdef jvm_hook __dealloc_hooks[MAX_HOOKS]
+cdef int __dealloc_hooks_pris[MAX_HOOKS]
+cdef inline void __insert_hook(jvm_hook hook, int priority, jvm_hook* hooks, int* pris, int n) nogil:
+    # TODO: use binary search instead of linear search
+    cdef int i
+    for i in xrange(n):
+        if priority < pris[i]:
+            memmove(hooks+i+1, hooks+i, (n-i)*sizeof(jvm_hook))
+            memmove(pris+i+1,  pris+i,  (n-i)*sizeof(int))
+            hooks[i] = hook
+            pris[i] = priority
+            return
+    hooks[n] = hook
+    pris[n] = priority
+cdef void jvm_add_init_hook(jvm_hook hook, int priority):
+    global __n_init_hooks
+    __insert_hook(hook, priority, __init_hooks, __init_hooks_pris, __n_init_hooks)
+    __n_init_hooks += 1
+cdef void jvm_add_dealloc_hook(jvm_hook hook, int priority):
+    global __n_dealloc_hooks
+    __insert_hook(hook, priority, __dealloc_hooks, __dealloc_hooks_pris, __n_dealloc_hooks)
+    __n_dealloc_hooks += 1
 
 
 ########## JVM Actions ##########
@@ -63,24 +114,33 @@ cdef class JVMAction(object):
     write their own run method which performs the desired action. This is designed to allow
     relatively easy implementation of callables and futures.
     """
-    cdef object event
-    cdef object exc, tb
     def __init__(self):
         import threading
         self.event = threading.Event()
-    cpdef int run(self, JEnv env) except -1:
+    cpdef run(self, JEnv env):
         """Called to run the action. It is given the Java environment for the current thread."""
         pass
     property completed:
         """Check if the action has completed."""
         def __get__(self): return self.event.is_set()
-    cpdef bint wait(self, timeout=None):
+    cpdef wait(self, timeout=None):
         """
         Wait for the action to be completed, returning True. If timeout if specified, wait at most
         that many seconds (can be a floating-point number). The return value in this case it True
         only if the action has completed and False if the timeout elapsed.
         """
         return self.event.wait(timeout)
+    cpdef execute(self):
+        """Asynchronously execute this action on the JVM main thread returning immediately."""
+        jvm.run_action(self)
+    cpdef execute_sync(self):
+        """
+        Synchronously execute this action on the JVM main thread returning when complete. If the
+        action raises an exception, this raises an exception as well.
+        """
+        jvm.run_action(self)
+        self.event.wait()
+        self.check_exception()
     property exception:
         """
         Get the exception raised by calling `run`, if any. Gives `None` if no exception occured or
@@ -93,32 +153,26 @@ cdef class JVMAction(object):
         occured or the action has not been run.
         """
         def __get__(self): return self.tb
-    cpdef int check_exception(self) except -1:
+    cpdef check_exception(self):
         """
         Checks the exception and if it is not `None`, raises it after clearing the exception data.
         """
-        if self.exc is None: return 0
+        if self.exc is None: return
         ex = self.exc
         tb = self.tb
         self.exc = None
         self.tb = None
         raise ex, None, tb
-    cpdef int clear_exception(self) except -1:
+    cpdef clear_exception(self):
         """Clears the exception data for the action."""
         self.exc = None
         self.tb = None
-        return 0
 
 
-    
+
 ########## JVM Class ##########
 cdef class JVM(object):
     """Class which wraps the native JavaVM pointer and contains a JEnv for each thread."""
-    cdef JavaVM* jvm
-    cdef object tls
-    cdef object main_thread
-    cdef object exc, tb
-    cdef object action_queue
     def run(self, list options, object start_event):
         """
         The JVM-Main thread function. Initializes the JVM, enters an event loop, and eventually
@@ -126,7 +180,7 @@ cdef class JVM(object):
         """
         import threading, sys
         self.main_thread = threading.current_thread()
-        
+
         cdef JEnv env = JEnv()
         cdef jsize nVMs
         cdef JavaVMInitArgs args
@@ -135,19 +189,20 @@ cdef class JVM(object):
         cdef bytes name, opt
         try:
             retval = JNI_GetCreatedJavaVMs(&self.jvm, 1, &nVMs)
-            raise_jni_err('Failed to find created Java VM', retval)
+            raise_jni_err(u'Failed to find created Java VM', retval)
             if nVMs != 0:
                 if len(options) != 0:
                     import warnings
-                    warnings.warn('Java VM already created so specified options are ignored', RuntimeWarning)
+                    warnings.warn(u'Java VM already created so specified options are ignored', RuntimeWarning)
                 self.__attach(env)
+                # TODO: should this quit now?
             else:
                 # TODO: hook exit and abort
                 args.version = JNI_VERSION
                 if len(options) > 0x7FFFFFFF: raise OverflowError()
                 args.nOptions = <jint>(len(options)+1)
                 args.options = <JavaVMOption*>malloc(sizeof(JavaVMOption)*args.nOptions)
-                if args.options == NULL: raise MemoryError('Unable to allocate JavaVMInitArgs memory')
+                if args.options == NULL: raise MemoryError(u'Unable to allocate JavaVMInitArgs memory')
                 options = [any_to_utf8j(option) for option in options]
                 for i,opt in enumerate(options,1): args.options[i].optionString = opt
                 with nogil:
@@ -155,20 +210,19 @@ cdef class JVM(object):
                     args.options[0].extraInfo    = <void*>vfprintf_hook
                     retval = JNI_CreateJavaVM(&self.jvm, <void**>&env.env, &args)
                     free(args.options)
-                raise_jni_err('Failed to create Java VM', retval)
+                raise_jni_err(u'Failed to create Java VM', retval)
             del options
-                
+            
             # Set the environment
             self.tls = threading.local()
             self.tls.env = env
-            
+
             # Initialize
-            for i in xrange(__n_early_init_hooks):
-                __early_init_hooks[i](env)
+            i = 0
+            while i < __n_init_hooks and __init_hooks_pris[i] < 0: __init_hooks[i](env); i += 1 # early hooks
             env.check_exc() # check for any exceptions from during early initialization
             env.init()
-            for i in xrange(__n_init_hooks):
-                __init_hooks[i](env)
+            while i < __n_init_hooks: __init_hooks[i](env); i += 1
             
         except Exception as ex:
             # Failed to start, save the exception and die
@@ -177,13 +231,16 @@ cdef class JVM(object):
             self.exc = ex
             self.tb = sys.exc_info()[2]
             return None
-        
+
         # Started!
         finally: start_event.set()
         del start_event
-            
+
         # Run the action queue (event loop)
-        from Queue import Queue
+        IF PY_VERSION < PY_VERSION_3:
+            from Queue import Queue
+        ELSE:
+            from queue import Queue
         self.action_queue = Queue()
         cdef JVMAction action
         while True:
@@ -196,23 +253,24 @@ cdef class JVM(object):
                 action.tb = sys.exc_info()[2]
             finally:
                 action.event.set()
-        
+
         # Stopping
-        for i in xrange(__n_dealloc_hooks):
+        for i in xrange(__n_dealloc_hooks-1, -1, -1):
             try:
                 __dealloc_hooks[i](env)
             except Exception as ex:
                 if self.exc is None:
                     self.exc = ex
                     self.tb = sys.exc_info()[2]
-        
+
         # Collect garbage just in case
         from gc import collect
         collect()
-        
+
+        # Destroy the JVM
         retval = self.jvm[0].DestroyJavaVM(self.jvm)
         if self.exc is None:
-            try: raise_jni_err('Failed to destroy Java VM', retval)
+            try: raise_jni_err(u'Failed to destroy Java VM', retval)
             except Exception as ex:
                 self.exc = ex
                 self.tb = sys.exc_info()[2]
@@ -228,25 +286,7 @@ cdef class JVM(object):
         self.exc = None
         self.tb = None
         raise ex, None, tb
-        
-    @staticmethod
-    cdef void add_early_init_hook(jvm_hook hook):
-        global __n_early_init_hooks
-        __early_init_hooks[__n_early_init_hooks] = hook
-        __n_early_init_hooks += 1
 
-    @staticmethod
-    cdef void add_init_hook(jvm_hook hook):
-        global __n_init_hooks
-        __init_hooks[__n_init_hooks] = hook
-        __n_init_hooks += 1
-
-    @staticmethod
-    cdef void add_dealloc_hook(jvm_hook hook):
-        global __n_dealloc_hooks
-        __dealloc_hooks[__n_dealloc_hooks] = hook
-        __n_dealloc_hooks += 1
-        
     cpdef int run_action(self, JVMAction action) except -1:
         """Runs a JVM action on the main JVM thread. This function returns immediately."""
         assert self.action_queue is not None
@@ -255,7 +295,7 @@ cdef class JVM(object):
         action.tb = None
         self.action_queue.put(action)
         return 0
-        
+
     cdef int __attach(self, JEnv env) except -1:
         import threading
         t = threading.current_thread()
@@ -274,10 +314,10 @@ cdef class JVM(object):
                 args.group = NULL
                 retval = self.jvm[0].AttachCurrentThreadAsDaemon(self.jvm, <void**>&env.env, &args) if daemon else \
                          self.jvm[0].AttachCurrentThread(self.jvm, <void**>&env.env, &args)
-        raise_jni_err('Failed to attach thread to Java VM', retval)
+        raise_jni_err(u'Failed to attach thread to Java VM', retval)
         env.init() # Initialize the environment
         return 0
-        
+
     cdef JEnv env(self):
         """
         Get the Java environment for the current thread. If this thread is not yet attached to the
@@ -290,16 +330,13 @@ cdef class JVM(object):
             self.tls.env = env
         return self.tls.env
 
-    cdef inline is_attached(self):
-        """Returns true if the current thread is currently attached to this JVM"""
-        return hasattr(self.tls, 'env')
-        
-    cdef detach(self):
+    cdef int detach(self) except -1:
         """Detaches the current thread from the JVM"""
         assert hasattr(self.tls, 'env')
         cdef jint retval = self.jvm[0].DetachCurrentThread(self.jvm)
-        raise_jni_err('Failed to detach thread', retval)
+        raise_jni_err(u'Failed to detach thread', retval)
         del self.tls.env
+        return 0
 
     cdef int destroy(self) except -1:
         """
@@ -319,7 +356,7 @@ cdef class JVM(object):
             self.check_pending_exception()
         return 0
     def __del__(self): self.destroy()
-    def __repr__(self): return '<Java VM instance at %s>'%str_ptr(self.jvm)
+    def __repr__(self): return u'<Java VM instance at %s>'%str_ptr(self.jvm)
 
 cdef inline int raise_jni_err(unicode base, int err) except -1:
     """
@@ -327,17 +364,17 @@ cdef inline int raise_jni_err(unicode base, int err) except -1:
     message. Raises one of MemoryError, ValueError, or RuntimeError depending on the error code.
     """
     if err == JNI_OK: return 0
-    cdef unicode msg = '%s: %d %s'%(base, err,
-                        {JNI_EDETACHED:'Thread detached from the VM',
-                         JNI_EVERSION: 'JNI version error',
-                         JNI_ENOMEM:   'Not enough memory',
-                         JNI_EEXIST:   'VM already created',
-                         JNI_EINVAL:   'Invalid arguments'}.get(err,'Unknown error'))
+    cdef unicode msg = u'%s: %d %s'%(base, err,
+                        {JNI_EDETACHED:u'Thread detached from the VM',
+                         JNI_EVERSION: u'JNI version error',
+                         JNI_ENOMEM:   u'Not enough memory',
+                         JNI_EEXIST:   u'VM already created',
+                         JNI_EINVAL:   u'Invalid arguments'}.get(err,u'Unknown error'))
     if   err == JNI_ENOMEM: raise MemoryError(msg)
     elif err == JNI_EINVAL: raise ValueError(msg)
     else: raise RuntimeError(msg)
 
-    
+
 ########## vprintfv JVM hook ##########
 from libc.stdio cimport FILE, stderr as c_stderr
 from libc.errno cimport errno, ENOMEM, EINVAL
@@ -370,11 +407,11 @@ cdef int vfprintf_hook(FILE *stream, const char * format, va_list arg) nogil:
     with gil:
         try:
             out = s
-            if __vfprintf_begin_line: out = 'JVM: ' + out
+            if __vfprintf_begin_line: out = u'JVM: ' + out
             import sys
             if stream == c_stderr: sys.stderr.write(out)
             else:                  sys.stdout.write(out)
-            __vfprintf_begin_line = out[-1] == '\n'
+            __vfprintf_begin_line = out[-1] == u'\n'
         except:
             errno = EINVAL
             return -1
@@ -383,7 +420,6 @@ cdef int vfprintf_hook(FILE *stream, const char * format, va_list arg) nogil:
 
 
 ########## JVM Handling ##########
-cdef JVM _jvm = None
 def jvm_get_default_options():
     """
     Get the default options for the JVM. No longer used in modern JNI veresion so just returns an
@@ -392,7 +428,7 @@ def jvm_get_default_options():
     cdef JavaVMInitArgs args
     args.version = JNI_VERSION
     cdef int i, retval = JNI_GetDefaultJavaVMInitArgs(&args)
-    if retval != JNI_OK: raise_jni_err('Failed to get default options of the Java VM', retval)
+    if retval != JNI_OK: raise_jni_err(u'Failed to get default options of the Java VM', retval)
     return [from_utf8j(args.options[i].optionString) for i in xrange(args.nOptions)]
 def jvm_create():
     """
@@ -400,20 +436,13 @@ def jvm_create():
     otherwise the JVM is created and it is returned. Due to the GIL, only one thread can call this
     function at once and thus no race issues.
     """
-    global _jvm
-    if _jvm is not None: raise RuntimeError('JVM already created')
-    _jvm = JVM()
-    return _jvm
+    global jvm
+    if jvm is not None: raise RuntimeError(u'JVM already created')
+    jvm = JVM()
+    return jvm
 def jvm_destroy():
     """Calls destroy() on the current JVM, if there is a current JVM, otherwise a no-op."""
-    global _jvm
-    if _jvm is not None:
-        _jvm.destroy()
-        _jvm = None
-
-cdef inline JVM jvm():
-    """Gets the global, singleton, JVM object or None if it isn't currently created."""
-    return _jvm
-cdef inline JEnv jenv():
-    """Gets the JEnv object for the current thread, creating it if necessary."""
-    return jvm().env()
+    global jvm
+    if jvm is not None:
+        jvm.destroy()
+        jvm = None

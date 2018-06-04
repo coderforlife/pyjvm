@@ -33,12 +33,29 @@ native byte order, and do not take an error handler. The encoders essentially us
 'surrogatepass' error handler except for in Python 2 when given bytes which requires the range of
 values to be in (1,128). The decoders use essentially the 'strict' error handler.
 
+A lot of the code is for dealing with the wide variety of ways that Python stores unicode strings
+in different circumstances.
+
 Internal functions:
-    unichr       - added for support in Python, just calls chr
+    unichr       - added for support in Python 2, just calls chr
+    unicode_len  - gets the length of a Python unicode string 
     any_to_utf8j - encodes either byte (in Python 2) or unicode (in Python 2/3) string to utf8j
     to_utf8j     - encodes a unicode string to utf8j
     from_utf8j   - decodes utf8j data to a unicode string
+    
+Additional internal functions for dealing with Python unicode data directly:
+    addl_chars_needed   - counts the number of additional characters needed to store a Python
+                          unicode string as a Java string due to surrogate pairs
+    n_chars_fit         - counts the number of characters that fit into a destination array
+                          accounting for surrogate pairs
+    get_direct_copy_ptr - gets a direct pointer to the unicode string if it can be directly
+                          copied to a UCS2 (Java char) array
+    copy_uni_to_ucs2    - copy a unicode string to a UCS2 array
 """
+
+from __future__ import absolute_import
+
+include "version.pxi"
 
 cdef extern from "stddef.h":
     ctypedef size_t uintptr_t
@@ -53,14 +70,21 @@ cdef extern from "Python.h":
 ctypedef unsigned char byte
 ctypedef unsigned char* p_byte
 ctypedef const unsigned char* cp_byte
-
 IF PY_VERSION < PY_VERSION_3_3:
-    DEF CODEC_NAME=b'utf-8-java'
-    DEF INVALID_START_BYTE=b'invalid start byte'
-    DEF UNEXPECTED_END_OF_DATA=b'unexpected end of data'
-    DEF INVALID_CONTINUATION_BYTE=b'invalid continuation byte'
+    # Older versions of Python don't define these at all
     ctypedef unsigned char  Py_UCS1
     ctypedef unsigned short Py_UCS2 # assumed that short is 16-bits
+ELSE:
+    cdef extern from "Python.h":
+        ctypedef unsigned char  Py_UCS1
+        ctypedef unsigned short Py_UCS2
+        
+DEF CODEC_NAME='utf-8-java'
+DEF INVALID_START_BYTE='invalid start byte'
+DEF UNEXPECTED_END_OF_DATA='unexpected end of data'
+DEF INVALID_CONTINUATION_BYTE='invalid continuation byte'
+
+IF PY_VERSION < PY_VERSION_3_3:
     from cpython.unicode cimport PyUnicode_AS_UNICODE, PyUnicode_GET_SIZE
     cdef extern from "Python.h":
         cdef unicode PyUnicode_FromStringAndSize(const char *u, Py_ssize_t size)
@@ -69,14 +93,7 @@ IF PY_VERSION < PY_VERSION_3_3:
         ELSE:
             cdef int PyUnicode_Resize "PyUnicodeUCS2_Resize" (PyObject **unicode, Py_ssize_t length) except -1
 ELSE:
-    cdef inline unicode unichr(int x): return chr(x)
-    DEF CODEC_NAME='utf-8-java'
-    DEF INVALID_START_BYTE='invalid start byte'
-    DEF UNEXPECTED_END_OF_DATA='unexpected end of data'
-    DEF INVALID_CONTINUATION_BYTE='invalid continuation byte'
     cdef extern from "Python.h":
-        ctypedef unsigned char  Py_UCS1
-        ctypedef unsigned short Py_UCS2
         cdef enum:
             PyUnicode_1BYTE_KIND
             PyUnicode_2BYTE_KIND
@@ -90,7 +107,7 @@ ELSE:
 
 
 ########## UTF-8-Java Encoders ##########
-cpdef inline bytes any_to_utf8j(basestring s):
+cpdef bytes any_to_utf8j(basestring s):
     """
     Encodes a string to UTF-8-Java. In Python 3 this is equivalent to to_utf8j and does not accept
     bytes. In Python 2 this accepts bytes or unicode. For bytes it simply checks that all values
@@ -98,7 +115,6 @@ cpdef inline bytes any_to_utf8j(basestring s):
     """
     IF PY_VERSION >= PY_VERSION_3: return to_utf8j(s)
     ELSE: return bytes_to_utf8j(<bytes>s) if PyBytes_Check(s) else to_utf8j(s)
-
 IF PY_VERSION < PY_VERSION_3:
     cdef bytes bytes_to_utf8j(bytes s):
         """
@@ -111,7 +127,7 @@ IF PY_VERSION < PY_VERSION_3:
         if n == sz: return s
         raise UnicodeEncodeError(CODEC_NAME, unichr(p[n]), n, n+1, b'ordinal not in range(1,128)')
 
-cpdef inline bytes to_utf8j(unicode s):
+cpdef bytes to_utf8j(unicode s):
     """
     Encodes a unicode string to UTF-8-Java. The delegates to one of
     (ascii|ucs1|ucs2|ucs4)_utf8java_encode based on the data storage of the unicode string.
@@ -133,7 +149,7 @@ cpdef inline bytes to_utf8j(unicode s):
             return ucs2_utf8java_encode(<Py_UCS2*>PyUnicode_DATA(s), PyUnicode_GET_LENGTH(s))
         elif kind == PyUnicode_4BYTE_KIND:
             return ucs4_utf8java_encode(<Py_UCS4*>PyUnicode_DATA(s), PyUnicode_GET_LENGTH(s))
-        else: raise TypeError('Unknown unicode data kind')
+        else: raise TypeError(u'Unknown unicode data kind')
 
 IF PY_VERSION >= PY_VERSION_3_3:
     cdef bytes ascii_utf8java_encode(const char *data, Py_ssize_t size):
@@ -308,9 +324,9 @@ ELSE:
         cdef Py_ssize_t size = PyBytes_GET_SIZE(b)
         cdef cp_byte s = <cp_byte>PyBytes_AS_STRING(b), start = s, end = s + size
 
-        if size == 0: return ''
+        if size == 0: return u''
         if size == 1 and 0 < s[0] < 0x80: return chr(s[0])
-        if size == 2 and s[0] == 0xC0 and s[1] == 0x80: return '\0'
+        if size == 2 and s[0] == 0xC0 and s[1] == 0x80: return u'\0'
 
         cdef Py_ssize_t pos = count_leading_ascii_nz(start, end)
         if pos == size:
@@ -362,7 +378,7 @@ ELSE:
             buf = PyUnicode_New(end-s+pos-2, ch); q = PyUnicode_DATA(buf); kind = PyUnicode_KIND(buf)
 
         if kind == PyUnicode_2BYTE_KIND:
-            widen_unicode(<Py_UCS1*>p, pos, <Py_UCS2*>q)
+            widen_unicode(<Py_UCS1*>p, <Py_UCS2*>q, pos)
             (<Py_UCS2*>q)[pos] = <Py_UCS2>ch; pos += 1
             ch = internal_utf8j_decode[Py_UCS2](&s, end, <Py_UCS2*>q, &pos)
             if check_unicode_error(start, s, end, ch) == 1:
@@ -372,9 +388,9 @@ ELSE:
 
         # kind == PyUnicode_4BYTE_KIND:
         if oldkind == PyUnicode_1BYTE_KIND:
-            widen_unicode(<Py_UCS1*>p, pos, <PyUCS4*>q)
+            widen_unicode(<Py_UCS1*>p, <PyUCS4*>q, pos)
         else:
-            widen_unicode(<Py_UCS2*>p, pos, <PyUCS4*>q)
+            widen_unicode(<Py_UCS2*>p, <PyUCS4*>q, pos)
         (<PyUCS4*>q)[pos] = ch; pos += 1
         ch = internal_utf8j_decode[PyUCS4](&s, end, <PyUCS4*>q, &pos)
         check_unicode_error(start, s, end, ch)
@@ -397,17 +413,17 @@ ELSE:
     cdef fused Py_UCS_24:
         Py_UCS2
         PyUCS4
-    cdef inline void widen_unicode(Py_UCS* s, Py_ssize_t len, Py_UCS_24* to):
+    cdef inline void widen_unicode(Py_UCS* s, Py_UCS_24* d, Py_ssize_t n):
         """Widen UCS data from one width to another."""
-        cdef const Py_UCS *end = s + len
-        cdef const Py_UCS *unrolled_end = s + (len & ~<size_t>3)
+        cdef const Py_UCS *end = s + n
+        cdef const Py_UCS *unrolled_end = s + (n & ~<size_t>3)
         while s < unrolled_end:
-            to[0] = <Py_UCS_24>s[0]; to[1] = <Py_UCS_24>s[1]
-            to[2] = <Py_UCS_24>s[2]; to[3] = <Py_UCS_24>s[3]
-            s += 4; to += 4
+            d[0] = <Py_UCS_24>s[0]; d[1] = <Py_UCS_24>s[1]
+            d[2] = <Py_UCS_24>s[2]; d[3] = <Py_UCS_24>s[3]
+            s += 4; d += 4
         while s < end:
-            to[0] = <Py_UCS_24>s[0]
-            s += 1; to += 1
+            d[0] = <Py_UCS_24>s[0]
+            s += 1; d += 1
 cdef inline Py_ssize_t count_leading_ascii_nz(cp_byte start, cp_byte end):
     """Get the count of number of ASCII characters (excluding 0) as the start of a string."""
     cdef cp_byte p = start, aligned_end = <cp_byte>((<uintptr_t>end) & ~LONG_PTR_MASK)
@@ -551,3 +567,77 @@ cdef PyUCS4 internal_utf8j_decode(cp_byte *s_ptr, cp_byte end, Py_UCS *dest, Py_
     else: ch = DATA_END
     s_ptr[0] = s; d_pos[0] = p - dest
     return ch
+
+
+##### Unicode Strings as Arrays #####
+IF PY_VERSION >= PY_VERSION_3_3 or PY_UNICODE_WIDE:
+    cdef inline Py_ssize_t __addl_chars_needed(const PyUCS4* s, Py_ssize_t n) nogil:
+        cdef const PyUCS4* end = s + n
+        n = 0
+        while s < end: n += s[0] >= 0x10000; s += 1
+        return n
+    cdef inline Py_ssize_t __n_chars_fit(const PyUCS4* s, Py_ssize_t n, Py_ssize_t n_elems) nogil:
+        cdef const PyUCS4* end = s+n
+        cdef Py_ssize_t n_src = 0, n_dst = 0
+        while s < end and n_dst < n_elems: n_dst += s[0] >= 0x10000; n_dst += 1; n_src += 1; s += 1
+        return n_src
+    cdef inline void __copy_ucs4_to_ucs2(const PyUCS4* src, Py_UCS2* dst, Py_ssize_t n) nogil:
+        cdef PyUCS4 ch
+        cdef const PyUCS4* end = src + n
+        while src < end:
+            ch = src[0]; src += 1
+            if ch >= 0x10000:
+                dst[0] = 0xD800 | ((ch >> 10) & 0x3FF)
+                dst[1] = 0xDC00 | (ch & 0x3FF)
+                dst += 2
+            else: dst[0] = ch; dst += 1
+
+cdef Py_ssize_t addl_chars_needed(unicode s, Py_ssize_t i, Py_ssize_t n) except -1:
+    """Counts the number of surrogate pairs required to encode the unicode string as UCS2."""
+    IF PY_VERSION >= PY_VERSION_3_3:
+        return __addl_chars_needed((<const PyUCS4*>PyUnicode_DATA(s))+i, n) if PyUnicode_KIND(s) == PyUnicode_4BYTE_KIND else 0
+    ELIF PY_UNICODE_WIDE:
+        return __addl_chars_needed((<const PyUCS4*>PyUnicode_AS_UNICODE(s))+i, n)
+    ELSE: return 0
+
+cdef Py_ssize_t n_chars_fit(unicode s, Py_ssize_t i, Py_ssize_t n, Py_ssize_t n_elems) except -1:
+    """
+    Counts the number of characters from the source that can be stored in an array of n_elems as
+    UCS2 after accounting for surrogate pairs.
+    """
+    IF PY_VERSION >= PY_VERSION_3_3:
+        return __n_chars_fit((<const PyUCS4*>PyUnicode_DATA(s))+i, n, n_elems) if PyUnicode_KIND(s) == PyUnicode_4BYTE_KIND else (n if n < n_elems else n_elems)
+    ELIF PY_UNICODE_WIDE:
+        return __n_chars_fit((<const PyUCS4*>PyUnicode_AS_UNICODE(s))+i, n, n_elems)
+    ELSE: return n if n < n_elems else n_elems 
+
+cdef void* get_direct_copy_ptr(unicode s):
+    """
+    If the unicode string can be directly copied to a UCS2 (Java char) array the pointer to the
+    string data is returned, otherwise NULL is returned.
+    """
+    IF PY_VERSION >= PY_VERSION_3_3:
+        return PyUnicode_DATA(s) if PyUnicode_KIND(s) == PyUnicode_2BYTE_KIND else NULL
+    ELIF PY_UNICODE_WIDE: return NULL
+    ELSE: return PyUnicode_AS_UNICODE(s)
+
+cdef int copy_uni_to_ucs2(unicode src, Py_ssize_t src_i, Py_ssize_t n, void* _dst, Py_ssize_t dst_i) except -1:
+    """
+    Copy unicode data from a unicode string to a UCS2 string (like a Java char array). This tries
+    to be as optimal as possible with copying of data. n is the number of characters from src,
+    might need more than n elements in dst if src is a unicode string in UCS4 encoding.
+    """
+    cdef Py_UCS2* dst = (<Py_UCS2*>_dst)+dst_i
+    IF PY_VERSION >= PY_VERSION_3_3:
+        kind = PyUnicode_KIND(src)
+        if kind == PyUnicode_4BYTE_KIND:
+            __copy_ucs4_to_ucs2((<PyUCS4*>PyUnicode_DATA(src))+src_i, dst, n)
+        elif kind == PyUnicode_1BYTE_KIND:
+            widen_unicode[Py_UCS1,Py_UCS2]((<Py_UCS1*>PyUnicode_DATA(src))+src_i, dst, n)
+        else: # kind == PyUnicode_2BYTE_KIND
+            memcpy(dst, (<Py_UCS2*>PyUnicode_DATA(src))+src_i, n*sizeof(Py_UCS2))
+    ELIF PY_UNICODE_WIDE:
+        __copy_ucs4_to_ucs2((<PyUCS4*>PyUnicode_AS_UNICODE(src))+src_i, dst, n)
+    ELSE:
+        memcpy(dst, PyUnicode_AS_UNICODE(src)+src_i, n*sizeof(Py_UCS2))
+    return 0
