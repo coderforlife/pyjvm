@@ -72,7 +72,7 @@ from cpython.slice   cimport PySlice_Check
 from cpython.list    cimport PyList_New, PyList_SET_ITEM
 from cpython.buffer  cimport PyObject_CheckBuffer, PyObject_GetBuffer, PyBuffer_Release
 from cpython.buffer  cimport PyBUF_WRITABLE, PyBUF_INDIRECT, PyBUF_SIMPLE, PyBUF_FORMAT, PyBUF_ND
-from cpython.unicode cimport PyUnicode_Check, PyUnicode_AsASCIIString, PyUnicode_DecodeUTF16
+from cpython.unicode cimport PyUnicode_Check, PyUnicode_AsASCIIString, PyUnicode_AsUTF8String, PyUnicode_DecodeUTF16
 from cpython.bytes   cimport PyBytes_Check, PyBytes_GET_SIZE, PyBytes_FromStringAndSize, PyBytes_AS_STRING
 cdef extern from "Python.h":
     cdef bint PyByteArray_Check(object o)
@@ -82,7 +82,11 @@ cdef extern from "Python.h":
 
 IF PY_VERSION < PY_VERSION_3_3:
     from cpython.unicode cimport PyUnicode_AS_UNICODE
+    cdef inline chr23(x): return x
+    cdef inline bytes bytes32(x): return x
 ELSE:
+    cdef inline unicode chr23(int x): return unichr(x)
+    cdef inline bytes bytes32(int x): return bytes((x,))
     cdef extern from "Python.h":
         cdef enum:
             PyUnicode_4BYTE_KIND
@@ -379,8 +383,8 @@ cdef struct JPrimArrayDef:
 # create_JPAD while removing the lines after them.
 cdef inline int get_buffer_format_by_size(jsize itemsize, bytes formats, char* out) except -1:
     from struct import calcsize
-    cdef bytes f, F = next((bytes((f,)) for f in formats if calcsize(chr(f)) == itemsize), None)
-    if F is None: F = next((b'='+bytes((f,)) for f in formats if calcsize('='+chr(f)) == itemsize), None)
+    cdef bytes f, F = next((bytes32(f) for f in formats if calcsize(chr23(f)) == itemsize), None)
+    if F is None: F = next((b'='+bytes32(f) for f in formats if calcsize('='+chr23(f)) == itemsize), None)
     if F is None: F = b'%dB'%itemsize # fallback
     out[0] = F[0]; out[1] = F[1] if len(F) > 1 else 0; out[2] = 0
 cdef inline void* get_array_descr_by_size(jsize itemsize, list templates) except? NULL:
@@ -1047,7 +1051,7 @@ cdef class JPrimitiveArray(JArray):
         return eq if op == 2 else not eq
     IF PY_VERSION < PY_VERSION_3:
         def __unicode__(self): return primarr_str(self)
-        def __str__(self): return utf8(primarr_str(self))
+        def __str__(self): return PyUnicode_AsUTF8String(primarr_str(self))
     ELSE:
         def __str__(self): return primarr_str(self)
 
@@ -1439,7 +1443,7 @@ cdef class JObjectArray(JArray):
     def toString(self, bint deep=True): return objarr_str(self.arr, self.length, deep)
     IF PY_VERSION < PY_VERSION_3:
         def __unicode__(self): return objarr_str(self.arr, self.length, True)
-        def __str__(self): return utf8(objarr_str(self.arr, self.length, True))
+        def __str__(self): return PyUnicode_AsUTF8String(objarr_str(self.arr, self.length, True))
     ELSE:
         def __str__(self): return objarr_str(self.arr, self.length, True)
 
@@ -1676,12 +1680,10 @@ cdef int init_array(JEnv env) except -1:
     # array.array templates
     import array
     global array_templates_bool, array_templates_char, array_templates_int, array_templates_fp
-    
-    # TODO: does this still work in Python 2?
-    array_templates_bool = [array.array(chr(tc)) for tc in array_typecodes_bool]
-    array_templates_char = [array.array(chr(tc)) for tc in array_typecodes_char]
-    array_templates_int  = [array.array(chr(tc)) for tc in array_typecodes_int]
-    array_templates_fp   = [array.array(chr(tc)) for tc in array_typecodes_fp]
+    array_templates_bool = [array.array(chr23(tc)) for tc in array_typecodes_bool]
+    array_templates_char = [array.array(chr23(tc)) for tc in array_typecodes_char]
+    array_templates_int  = [array.array(chr23(tc)) for tc in array_typecodes_int]
+    array_templates_fp   = [array.array(chr23(tc)) for tc in array_typecodes_fp]
 
     # Primitive array definitions
     create_JPAD[jboolean](env, &jpad_boolean, <jboolean>0, PT_Boolean, b'Z', JEnv.NewBooleanArray,

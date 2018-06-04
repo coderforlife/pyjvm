@@ -69,6 +69,7 @@ cdef extern from "Python.h":
     PY_LONG_LONG PyLong_AsLongLongAndOverflow(object vv, int *overflow) except? -1
     
 from .utils cimport is_string, to_unicode
+from .unicode cimport from_utf8j
 
 from .jni cimport jobject, jarray, jobjectArray, jvalue, jsize, jstring
 from .jni cimport jboolean, jbyte, jchar, jshort, jint, jlong, jfloat, jdouble

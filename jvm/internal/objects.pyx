@@ -53,6 +53,7 @@ from cpython.tuple  cimport PyTuple_New, PyTuple_SET_ITEM
 from cpython.number cimport PyNumber_Index
 from cpython.bytes  cimport PyBytes_Check
 from cpython.slice  cimport PySlice_Check
+from cpython.unicode cimport PyUnicode_AsUTF8String
 
 from .utils cimport to_unicode, KEYS
 
@@ -168,7 +169,7 @@ class JavaClass(type):
             i = tuple_put_class(new_bases, i, s)
         for c in interfaces: i = tuple_put_class(new_bases, i, c)
 
-        IF PY_VERSION < PY_VERSION_3: name = utf8(name)
+        IF PY_VERSION < PY_VERSION_3: name = PyUnicode_AsUTF8String(name)
         if len(new_bases) > 1 and object in new_bases:
             new_bases = tuple(b for b in new_bases if b != object)
         obj = type.__new__(cls, name, new_bases, attr)
@@ -264,7 +265,7 @@ class JavaClass(type):
         return list(KEYS(c.static_fields)) + list(KEYS(c.static_methods)) + list(KEYS(c.static_classes))
     IF PY_VERSION < PY_VERSION_3:
         def __unicode__(self): return repr(self)
-        def __str__(self): return utf8(repr(self))
+        def __str__(self): return PyUnicode_AsUTF8String(repr(self))
     ELSE:
         def __str__(self): return repr(self)
     def __repr__(self):
@@ -682,7 +683,7 @@ cdef int init_objects(JEnv env) except -1:
             return not jenv().CallBooleanMethod(get_object(self), ObjectDef.equals, &val, True)
         IF PY_VERSION < PY_VERSION_3:
             def __unicode__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.toString, NULL, True)
-            def __str__(self): return utf8(jenv().CallObjectMethod(get_object(self), ObjectDef.toString, NULL, True))
+            def __str__(self): return PyUnicode_AsUTF8String(jenv().CallObjectMethod(get_object(self), ObjectDef.toString, NULL, True))
         ELSE:
             def __str__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.toString, NULL, True)
         def __repr__(self):
@@ -708,7 +709,7 @@ cdef int init_objects(JEnv env) except -1:
         def __len__(self): return self._jcall0(u'length')
         IF PY_VERSION < PY_VERSION_3:
             def __unicode__(self): return jenv().pystr(<jstring>get_object(self), False)
-            def __str__(self): return utf8(jenv().pystr(<jstring>get_object(self), False))
+            def __str__(self): return PyUnicode_AsUTF8String(jenv().pystr(<jstring>get_object(self), False))
         ELSE:
             def __str__(self): return jenv().pystr(<jstring>get_object(self), False)
     @java_class(u'java.lang.Enum', Object)
@@ -725,7 +726,7 @@ cdef int init_objects(JEnv env) except -1:
     class Throwable(object):
         IF PY_VERSION < PY_VERSION_3:
             def __unicode__(self): return self._jcall0(u'getLocalizedMessage')
-            def __str__(self): return utf8(self._jcall0(u'getLocalizedMessage'))
+            def __str__(self): return PyUnicode_AsUTF8String(self._jcall0(u'getLocalizedMessage'))
         ELSE:
             def __str__(self): return self._jcall0(u'getLocalizedMessage')
 

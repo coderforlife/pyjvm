@@ -20,10 +20,9 @@ from __future__ import absolute_import
 
 include "version.pxi"
 
-IF PY_VERSION >= PY_VERSION_3:
-    cdef inline unicode unichr(int x): return chr(x)
-ELSE:
-    unichr
+# Support the name unichr for both Python 2 and 3 the same
+from cpython.unicode cimport PyUnicode_FromOrdinal as unichr
+#cdef inline unicode unichr(int x): return PyUnicode_FromOrdinal(x)
 
 cpdef bytes any_to_utf8j(basestring s)
 cpdef bytes to_utf8j(unicode s)
