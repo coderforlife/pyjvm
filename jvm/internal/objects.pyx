@@ -327,8 +327,7 @@ cdef class JavaMethods(object):
         cdef list methods = []
         cdef set sigs = set()
         while cls is not None:
-            if name in cls.fields or name in cls.classes or name in cls.static_methods or name in cls.static_fields or name in cls.static_classes:
-                break
+            if name in cls.fields or name in cls.classes: break
             for m in cls.methods.get(name, []):
                 sig = m.param_sig()
                 if not m.is_abstract() and sig not in sigs:
