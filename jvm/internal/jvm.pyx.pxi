@@ -74,7 +74,7 @@ from .jni cimport jint, jsize
 #   jclasses    -8   (jref)
 #   boxes       -7   (jref)
 #   importer    -1   (packages)
-#   jcf          1   (jref)
+#   jcf          1   (jref, no dealloc)
 #   objects      2
 #   p2j          3   (convert)
 #   array        5
@@ -168,8 +168,6 @@ cdef class JVMAction(object):
         self.exc = None
         self.tb = None
 
-
-
 ########## JVM Class ##########
 cdef class JVM(object):
     """Class which wraps the native JavaVM pointer and contains a JEnv for each thread."""
@@ -199,6 +197,7 @@ cdef class JVM(object):
             else:
                 # TODO: hook exit and abort
                 args.version = JNI_VERSION
+                args.ignoreUnrecognized = False
                 if len(options) > 0x7FFFFFFF: raise OverflowError()
                 args.nOptions = <jint>(len(options)+1)
                 args.options = <JavaVMOption*>malloc(sizeof(JavaVMOption)*args.nOptions)
@@ -206,7 +205,7 @@ cdef class JVM(object):
                 options = [any_to_utf8j(option) for option in options]
                 for i,opt in enumerate(options,1): args.options[i].optionString = opt
                 with nogil:
-                    args.options[0].optionString = 'vfprintf'
+                    args.options[0].optionString = b'vfprintf'
                     args.options[0].extraInfo    = <void*>vfprintf_hook
                     retval = JNI_CreateJavaVM(&self.jvm, <void**>&env.env, &args)
                     free(args.options)
@@ -224,6 +223,12 @@ cdef class JVM(object):
             env.init()
             while i < __n_init_hooks: __init_hooks[i](env); i += 1
             
+            # Create the action queue
+            IF PY_VERSION < PY_VERSION_3:
+                from Queue import Queue
+            ELSE:
+                from queue import Queue
+            self.action_queue = Queue()
         except Exception as ex:
             # Failed to start, save the exception and die
             self.tls = None
@@ -237,11 +242,6 @@ cdef class JVM(object):
         del start_event
 
         # Run the action queue (event loop)
-        IF PY_VERSION < PY_VERSION_3:
-            from Queue import Queue
-        ELSE:
-            from queue import Queue
-        self.action_queue = Queue()
         cdef JVMAction action
         while True:
             action = self.action_queue.get()
@@ -253,7 +253,7 @@ cdef class JVM(object):
                 action.tb = sys.exc_info()[2]
             finally:
                 action.event.set()
-
+        
         # Stopping
         for i in xrange(__n_dealloc_hooks-1, -1, -1):
             try:
@@ -264,8 +264,8 @@ cdef class JVM(object):
                     self.tb = sys.exc_info()[2]
 
         # Collect garbage just in case
-        from gc import collect
-        collect()
+        import gc
+        gc.collect()
 
         # Destroy the JVM
         retval = self.jvm[0].DestroyJavaVM(self.jvm)

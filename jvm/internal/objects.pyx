@@ -48,8 +48,6 @@ from __future__ import absolute_import
 
 include "version.pxi"
 
-from cpython.ref cimport Py_INCREF
-from cpython.tuple  cimport PyTuple_New, PyTuple_SET_ITEM
 from cpython.number cimport PyNumber_Index
 from cpython.bytes  cimport PyBytes_Check
 from cpython.slice  cimport PySlice_Check
@@ -84,15 +82,6 @@ cdef create_java_object(jobject obj):
             cls = cls._bind_inner_class_to(env.GetObjectField(obj, fid))
         except Exception as ex: pass
     return cls.__new__(cls, JObject.create(env, obj))
-
-cdef inline Py_ssize_t tuple_put(tuple t, Py_ssize_t i, x) except -1:
-    Py_INCREF(x)
-    PyTuple_SET_ITEM(t, i, x)
-    return i + 1
-cdef inline Py_ssize_t tuple_put_class(tuple t, Py_ssize_t i, JClass x) except -1:
-    Py_INCREF(x)
-    PyTuple_SET_ITEM(t, i, get_java_class(x.name))
-    return i + 1
 
 def java_class(class_name, *bases):
     """Makes the decorated class a Java Class template with the given class name."""
@@ -150,29 +139,26 @@ class JavaClass(type):
         cdef bint is_objarr = clazz.is_array() and not clazz.component_type.is_primitive()
         cdef bint has_super = s is not None
         cdef tuple old_bases = tuple(b for b in bases if not isinstance(b, JavaClass))
-        cdef Py_ssize_t n_bases = is_objarr + has_super + len(old_bases) + len(clazz.interfaces), i = 0
         cdef list interfaces = clazz.interfaces[:]
-        cdef tuple new_bases = PyTuple_New(n_bases)
+        cdef list new_bases = []
         for b in bases:
-            if not isinstance(b, JavaClass):
-                i = tuple_put(new_bases, i, b)
+            if not isinstance(b, JavaClass): new_bases.append(b)
             elif not (<JClass>b.__jclass__).is_interface():
                 if not has_super: raise TypeError(u"Invalid base classes for '%s' - two super-classes specified"%cn)
-                if is_objarr: i = tuple_put(new_bases, i, JObjectArray)
-                i = tuple_put_class(new_bases, i, s)
+                if is_objarr: new_bases.append(JObjectArray)
+                new_bases.append(get_java_class(s.name))
                 has_super = False
             elif b.__jclass__ in interfaces:
                 c = interfaces.pop(interfaces.index(b.__jclass__))
-                tuple_put_class(new_bases, i, c)
+                new_bases.append(get_java_class(c.name))
         if has_super:
-            if is_objarr: i = tuple_put(new_bases, i, JObjectArray)
-            i = tuple_put_class(new_bases, i, s)
-        for c in interfaces: i = tuple_put_class(new_bases, i, c)
-
+            if is_objarr: new_bases.append(JObjectArray)
+            new_bases.append(get_java_class(s.name))
+        for c in interfaces: new_bases.append(get_java_class(c.name))
+        
         IF PY_VERSION < PY_VERSION_3: name = PyUnicode_AsUTF8String(name)
-        if len(new_bases) > 1 and object in new_bases:
-            new_bases = tuple(b for b in new_bases if b != object)
-        obj = type.__new__(cls, name, new_bases, attr)
+        if len(new_bases) > 1 and object in new_bases: new_bases.remove(object)
+        obj = type.__new__(cls, name, tuple(new_bases), attr)
         classes[cn] = obj
         return obj
     def __getattr__(self, _name):
