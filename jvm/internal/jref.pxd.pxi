@@ -158,7 +158,7 @@ cdef inline int delete_global_ref(jobject obj) except -1:
     state of the JVM to this thread.
     """
     if jvm is not None:
-        # TODO: make sure this JVM is the same JVM that created the jobject
+        # TODO: make sure this JVM is the same JVM that created the jobject?
         if jvm.is_attached(): jenv().DeleteGlobalRef(obj)
         else: jvm.run_action(DeleteGlobalRefAction.create(obj))
     return 0

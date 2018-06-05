@@ -28,6 +28,9 @@ Internal functions:
     add_class_to_packages - adds a newly loaded class to the database of packages and classes
     get_pkg_desc          - gets the description of a package
     get_pkgs_and_classes  - gets the pcakages and classes that are immediately under a package
+    
+FUTURE:
+    add Java 9 module support which is able to discover available packages and classes cleaner
 """
 
 from __future__ import absolute_import
