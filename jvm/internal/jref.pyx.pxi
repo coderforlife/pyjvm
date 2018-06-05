@@ -61,6 +61,9 @@ FUTURE:
 
 #from __future__ import absolute_import
 
+from cpython.ref cimport Py_INCREF
+from cpython.list cimport PyList_New, PyList_SET_ITEM
+
 from .utils cimport VALUES
 from .jni cimport JNIEnv, jclass, jobject, jmethodID, jfieldID, jvalue, jsize
 #from .jvm cimport jvm_add_init_hook, jvm_add_dealloc_hook, JVMAction
@@ -215,6 +218,7 @@ cdef void init_ClassLoaderDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/ClassLoader')
     ClassLoaderDef.clazz     = <jclass>NewGlobalRef(env, C)
     ClassLoaderDef.getParent = GetMethodID(env, C, b'getParent', b'()Ljava/lang/ClassLoader;')
+    ClassLoaderDef.resolveClass = GetMethodID(env, C, b'resolveClass', b'(Ljava/lang/Class;)V')
     ClassLoaderDef.getSystemClassLoader = GetStaticMethodID(env, C, b'getSystemClassLoader', b'()Ljava/lang/ClassLoader;')
     DeleteLocalRef(env, C)
     C = FindClass(env, b'java/net/URLClassLoader')
@@ -226,6 +230,7 @@ cdef void dealloc_ClassLoaderDef(JNIEnv* env) nogil:
     if ClassLoaderDef.clazz is not NULL: DeleteGlobalRef(env, ClassLoaderDef.clazz)
     ClassLoaderDef.clazz     = NULL
     ClassLoaderDef.getParent = NULL
+    ClassLoaderDef.resolveClass = NULL
     ClassLoaderDef.getSystemClassLoader = NULL
     if URLClassLoaderDef.clazz is not NULL: DeleteGlobalRef(env, URLClassLoaderDef.clazz)
     URLClassLoaderDef.clazz   = NULL

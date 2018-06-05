@@ -85,7 +85,7 @@ cdef struct JSystemDef:
     jmethodID arraycopy, getProperty, gc, identityHashCode # static
 cdef struct JClassLoaderDef:
     jclass clazz
-    jmethodID getParent
+    jmethodID getParent, resolveClass
     jmethodID getSystemClassLoader # static
 cdef struct JURLClassLoaderDef:
     jclass clazz
@@ -212,7 +212,10 @@ cdef class JBase(object):
         # Fields:       STATIC | FINAL | VOLATILE | TRANSIENT
     #cdef bint is_synthetic
     cdef JClass declaring_class # None for anonymous and local classes, enclosing class always works
-    cdef inline Modifiers access(self): return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
+    cdef inline Modifiers access(self):  return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
+    cdef inline bint is_public(self):    return (self.modifiers & PUBLIC)    == PUBLIC
+    cdef inline bint is_protected(self): return (self.modifiers & PRIVATE)   == PRIVATE
+    cdef inline bint is_private(self):   return (self.modifiers & PROTECTED) == PROTECTED
     cdef inline bint is_static(self): return (self.modifiers & STATIC)   == STATIC
     cdef inline bint is_final(self):  return (self.modifiers & FINAL)    == FINAL
 
@@ -295,7 +298,7 @@ cdef class JMethod(JBase):
     cdef inline unicode param_sig(self):
         cdef JClass t
         return u''.join([t.sig() for t in self.param_types])
-    cdef inline bint is_ctor(self):         return self.return_type is None # TODO: need: and (self.name == u"<init>" or self.name == u"<clinit>") ?
+    cdef inline bint is_ctor(self):         return self.return_type is None # NOTE: constructor names are the class names, not the special "<init>"
     cdef inline unicode return_sig(self):   return u'V' if self.return_type is None else self.return_type.sig()
     cdef inline unicode sig(self):          return u'(%s)%s' % (self.param_sig(), self.return_sig())
     cdef inline bint is_synchronized(self): return (self.modifiers & SYNCHRONIZED) == SYNCHRONIZED

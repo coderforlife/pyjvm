@@ -34,8 +34,6 @@ Internal functions:
 
 #from __future__ import absolute_import
 
-from cpython.ref cimport Py_INCREF
-from cpython.list cimport PyList_New, PyList_SET_ITEM
 from cpython.unicode cimport PyUnicode_DecodeUTF16
 
 from .utils cimport PyThreadState, PyEval_SaveThread, PyEval_RestoreThread
@@ -130,11 +128,17 @@ cdef class JEnv(object):
 
     # Class Operations
     cdef jobject DefineClass(self, unicode name, jobject loader, bytes buf):
-        assert name is not None and loader is not NULL and buf is not None
-        cdef bytes bn = to_utf8j(name.replace(u'.', u'/'))
-        cdef jclass clazz = self.env[0].DefineClass(self.env, bn, loader, buf, <jsize>len(buf))
+        assert buf is not None
+        cdef jclass clazz
+        if name is None:
+            clazz = self.env[0].DefineClass(self.env, NULL, loader, buf, <jsize>len(buf))
+        else:
+            clazz = self.env[0].DefineClass(self.env, to_utf8j(name.replace(u'.', u'/')), loader, buf, <jsize>len(buf))
         if clazz is NULL: self.check_exc()
         return clazz
+    #cdef inline jclass FindClass(self, unicode name) except NULL:
+    #cdef inline jclass GetSuperclass(self, jclass clazz) except? NULL:
+    #cdef inline bint IsAssignableFrom(self, jclass clazz1, jclass clazz2) except -1:
 
     # Exceptions - no error checking for any of these functions since they all manipulate the exception state
     cdef jint Throw(self, jthrowable obj):

@@ -68,6 +68,11 @@ cdef class JEnv(object):
     """
     cdef JNIEnv* env
     cdef int init(self) except -1
+    @staticmethod
+    cdef inline JEnv wrap(JNIEnv* _env):
+        cdef JEnv env = JEnv()
+        env.env = _env
+        return env
     
     # Basic Conversion
     cdef unicode pystr(self, jstring string, delete=*)
