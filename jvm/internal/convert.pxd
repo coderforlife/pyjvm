@@ -23,7 +23,7 @@ from .core cimport JObject, JClass, JMethod, JEnv
 from .objects cimport get_object
 
 
-cdef object object2py(jobject obj)
+cdef object object2py(JEnv env, jobject obj)
 cdef inline jobject py2object(JEnv env, object x, JClass target) except? NULL:
     """
     Converts a Python object to an instance of the given target class (or a subclass). A new local

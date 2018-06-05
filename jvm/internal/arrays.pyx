@@ -1282,7 +1282,8 @@ cdef class JObjectArray(JArray):
             if j < 0: j += self.length
             if i > j: raise IndexError(u'%d > %d' % (i,j))
             return self.copyOf(i, j)
-        return object2py(jenv().GetObjectArrayElement(self.arr, check_index(index, self.length)))
+        cdef JEnv env = jenv()
+        return object2py(env, env.GetObjectArrayElement(self.arr, check_index(index, self.length)))
     def __setitem__(self, index, value):
         """
         Sets an item, either from a slice with step 1 or a single index. A slice requires the
@@ -1313,12 +1314,12 @@ cdef class JObjectArray(JArray):
         cdef JEnv env = jenv()
         cdef jobjectArray arr = <jobjectArray>self.arr
         cdef jsize i
-        for i in xrange(self.length): yield object2py(env.GetObjectArrayElement(arr, i))
+        for i in xrange(self.length): yield object2py(env, env.GetObjectArrayElement(arr, i))
     def __reversed__(self):
         cdef JEnv env = jenv()
         cdef jobjectArray arr = <jobjectArray>self.arr
         cdef jsize i
-        for i in xrange(self.length-1, -1, -1): yield object2py(env.GetObjectArrayElement(arr, i))
+        for i in xrange(self.length-1, -1, -1): yield object2py(env, env.GetObjectArrayElement(arr, i))
 
     ##### Basic sequence algorithms #####
     def __contains__(self, val):
@@ -1471,7 +1472,7 @@ cdef list tolist_deep(JEnv env, jobjectArray arr, jsize start, jsize stop):
     for i in xrange(n):
         obj = env.GetObjectArrayElement(arr, start+i)
         clazz = JClass.get(env, env.GetObjectClass(obj))
-        x = (object2py(obj) if not clazz.is_array() else
+        x = (object2py(env, obj) if not clazz.is_array() else
              tolist_prim(env, <jarray>obj, clazz.component_type) if clazz.component_type.is_primitive() else
              tolist_deep(env, <jobjectArray>obj, 0, env.GetArrayLength(<jarray>obj)))
         Py_INCREF(x)
@@ -1481,7 +1482,7 @@ cdef list tolist_shallow(JEnv env, jobjectArray arr, jsize start, jsize stop):
     cdef jsize i, n = stop-start
     cdef list out = PyList_New(n)
     for i in xrange(n):
-        x = object2py(env.GetObjectArrayElement(arr, start+i))
+        x = object2py(env, env.GetObjectArrayElement(arr, start+i))
         Py_INCREF(x)
         PyList_SET_ITEM(out, i, x)
     return out

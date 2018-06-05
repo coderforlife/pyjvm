@@ -94,11 +94,10 @@ from .objects cimport get_java_class, create_java_object, get_object_class, get_
 # null value and java.lang.String objects are converted (to None and unicodes). This does mean
 # that the end user can never get an actual java.lang.String object - ever.
 
-cdef object object2py(jobject obj):
+cdef object object2py(JEnv env, jobject obj):
     """Convert a Java object to a Python object. The jobject reference is deleted."""
     # NOTE: if this function is updated, JEnv.__object2py needs to be updated as well
     if obj is NULL: return None # null -> None
-    cdef JEnv env = jenv()
     cdef JClass clazz = JClass.get(env, env.GetObjectClass(obj))
     if clazz.name == u'java.lang.String': return env.pystr(<jstring>obj)
     return create_java_object(obj)
