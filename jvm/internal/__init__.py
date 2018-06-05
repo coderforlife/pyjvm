@@ -28,6 +28,7 @@ from .arrays import *
 from .packages import *
 from .numbers import *
 from .collections import *
+from .synth import *
 
 # The set of functions that should be publicly accessible
 publicfuncs = {

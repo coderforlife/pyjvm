@@ -151,4 +151,5 @@ For more information, see the included README.md file or using `help(jvm)`.
               get_ext('internal.packages', debug),
               get_ext('internal.numbers', debug),
               get_ext('internal.collections', debug),
+              get_ext('internal.synth', debug),
           ]))
