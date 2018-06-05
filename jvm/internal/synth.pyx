@@ -230,7 +230,8 @@ cdef dict java2ctypes = {
 }
 cdef inline void* ptr(uintptr_t x): return <void*>x
 cdef dict selfs = { }
-cdef void* create_bridge(JEnv env, method, unicode sig, is_init) except NULL:
+cdef void* create_bridge(JEnv env, cls, method, unicode sig, is_init) except NULL:
+    # Parse the signature
     last_paren = sig.rindex(u')')
     return_sig = sig[last_paren+1:]
     cdef JClass return_cls = None
@@ -249,6 +250,7 @@ cdef void* create_bridge(JEnv env, method, unicode sig, is_init) except NULL:
         param_sig = param_sig[i:]
         
     # Create the Python bridge function
+    cdef jfieldID self_fid = <jfieldID>ptr(cls.__pyjvm_self_fid__)
     def pyjvm_bridge(_env, _obj, *args):
         cdef JEnv env = JEnv.wrap(<JNIEnv*>ptr(_env))
         cdef jobject obj = <jobject>ptr(_obj)
@@ -262,12 +264,12 @@ cdef void* create_bridge(JEnv env, method, unicode sig, is_init) except NULL:
             new_args.append(arg)
         # Call the method
         if is_init:
-            self = ... # TODO
+            self = cls.__new__(cls) # TODO: should be from the JavaClass
             selfs[id(self)] = self
-            env.env[0].SetLongField(env.env, obj, <jfieldID>ptr(method.__pyjvm_self_fid__), id(self))
+            env.env[0].SetLongField(env.env, obj, self_fid, id(self))
             env.check_exc()
         else:
-            self = selfs[env.GetLongField(obj, <jfieldID>ptr(method.__pyjvm_self_fid__))]
+            self = selfs[env.GetLongField(obj, self_fid)]
         retval = method(self, *new_args)
         # Convert the return value
         if return_sig[0] == u'L' or return_sig[0] == u'[':
@@ -401,6 +403,7 @@ def synth_class(cls, methods, superclass=None, interfaces=()):
     env.CallVoidMethod(class_loader, ClassLoaderDef.resolveClass, &val, True)
     
     # Link the Java methods to Python
+    cls.__pyjvm_self_fid__ = <uintptr_t>env.GetFieldID(jcls, u'__pyjvm_self$$', u'J')
     cdef jint n_nat_meths = len(meth_infos) - ctors
     cdef JNINativeMethod* nat_meths = <JNINativeMethod*>malloc(n_nat_meths*sizeof(JNINativeMethod))
     cdef list temps = []
@@ -409,12 +412,12 @@ def synth_class(cls, methods, superclass=None, interfaces=()):
             if (mi.mod&NATIVE) == 0: continue
             temps.append(to_utf8j(mi.name)); nat_meths[i].name = temps[-1]
             temps.append(to_utf8j(mi.sig));  nat_meths[i].signature = temps[-1]
-            mi.pymeth.__pyjvm_self_fid__ = <uintptr_t>env.GetFieldID(jcls, u'__pyjvm_self$$', u'J')
-            nat_meths[i].fnPtr = create_bridge(env, mi.pymeth, mi.sig, (mi.mod&PRIVATE)==PRIVATE)
+            nat_meths[i].fnPtr = create_bridge(env, cls, mi.pymeth, mi.sig, (mi.mod&PRIVATE)==PRIVATE)
             i += 1
         env.RegisterNatives(jcls, nat_meths, n_nat_meths)
     finally: free(nat_meths)
-    cls.__dealloc__ = lambda self : jenv().UnregisterNatives(jcls) # TODO: should be put onto main thread if not already attached
+    # TODO: should be put onto new JavaClass class
+    cls.__dealloc__ = lambda self : unregister_natives(jcls)
 
     # Load the JavaClass
     return get_java_class(name)

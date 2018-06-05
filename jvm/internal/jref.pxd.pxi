@@ -141,8 +141,8 @@ cdef JThreadDef      ThreadDef
 
 
 ########## Basic actions that can be queued in the JVM thread ##########
-# Currently only the DeleteGlobalRefAction is used, the other are just here because they might be
-# useful eventually.
+# Currently only the DeleteGlobalRefAction and UnregisterNativesAction are used, the others are
+# just here because they might be useful eventually.
 cdef class DeleteGlobalRefAction(JVMAction):
     """Calls DeleteGlobalRef on the object"""
     cdef jobject obj
@@ -154,13 +154,32 @@ cdef class DeleteGlobalRefAction(JVMAction):
     cpdef run(self, JEnv env)
 cdef inline int delete_global_ref(jobject obj) except -1:
     """
-    Either calls DeleteGlobalRef on the current thread or as an action dependin on the attached
+    Either calls DeleteGlobalRef on the current thread or as an action depending on the attached
     state of the JVM to this thread.
     """
     if jvm is not None:
         # TODO: make sure this JVM is the same JVM that created the jobject?
         if jvm.is_attached(): jenv().DeleteGlobalRef(obj)
         else: jvm.run_action(DeleteGlobalRefAction.create(obj))
+    return 0
+cdef class UnregisterNativesAction(JVMAction):
+    """Calls UnregisterNatives on the object"""
+    cdef jobject obj
+    @staticmethod
+    cdef inline UnregisterNativesAction create(jobject obj):
+        cdef UnregisterNativesAction action = UnregisterNativesAction()
+        action.obj = obj
+        return action
+    cpdef run(self, JEnv env)
+cdef inline int unregister_natives(jobject obj) except -1:
+    """
+    Either calls UnregisterNatives on the current thread or as an action depending on the attached
+    state of the JVM to this thread.
+    """
+    if jvm is not None:
+        # TODO: make sure this JVM is the same JVM that created the jobject?
+        if jvm.is_attached(): jenv().UnregisterNatives(obj)
+        else: jvm.run_action(UnregisterNativesAction.create(obj))
     return 0
 cdef class RunnableAction(JVMAction):
     """Calls obj.run() with or without the GIL"""

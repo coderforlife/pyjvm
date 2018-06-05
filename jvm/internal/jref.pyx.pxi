@@ -32,6 +32,10 @@ Internal classes:
     JMethod - wrapper around a jmethodID / java.lang.reflect.Method / java.lang.reflect.Constructor
     JField  - wrapper around a jfieldID / java.lang.reflect.Field
     JObject - wrapper around a jobject / java.lang.Object
+    DeleteGlobalRefAction   - JVMAction to perform DeleteGlobalRef
+    UnregisterNativesAction - JVMAction to perform UnregisterNatives
+    RunnableAction          - JVMAction to execute a Runnable
+    GCAction                - JVMAction to perform garbage collection in Java and Python
 
 Internal values:
     ObjectDef      - common jmethodIDs needed from java.lang.Object
@@ -51,6 +55,8 @@ Internal values:
 Internal functions:
     box_<primitive>   - box a primitive value, one function for each primitive type
     protection_prefix - get the Python prefix (e.g. '__') for an access modifier
+    delete_global_ref  - eithers calls DeleteGlobalRef now or as an action on the JVM thread
+    unregister_natives - eithers calls UnregisterNatives now or as an action on the JVM thread
 
 TODO:
     should all JObjects be dealloced when JVM deallocs?
@@ -452,13 +458,18 @@ jvm_add_dealloc_hook(dealloc_def, -10)
 
 
 ########## Basic actions that can be queued in the JVM thread ##########
-# Currently only the DeleteGlobalRefAction is used, the other are just here because they might be
-# useful eventually.
+# Currently only the DeleteGlobalRefAction and UnregisterNativesAction are used, the others are
+# just here because they might be useful eventually.
 cdef class DeleteGlobalRefAction(JVMAction):
     """Calls DeleteGlobalRef on the object"""
     cpdef run(self, JEnv env):
         assert self.obj is not NULL
         env.DeleteGlobalRef(self.obj)
+cdef class DeleteGlobalRefAction(JVMAction):
+    """Calls UnregisterNatives on the object"""
+    cpdef run(self, JEnv env):
+        assert self.obj is not NULL
+        env.UnregisterNatives(self.obj)
 cdef class RunnableAction(JVMAction):
     """Calls obj.run() with or without the GIL"""
     cpdef run(self, JEnv env):
