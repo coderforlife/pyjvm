@@ -24,7 +24,7 @@ classes and interfaces to make them more Python-like.
 
 Public functions:
     get_java_class - gets a JavaClass from a unicode string
-    java_class     - class decorator for defining Java Class templates
+    template       - class decorator for defining Java Class templates
 
 Public classes:
     JavaClass         - the type of all Java objects, not a replacement for java.lang.Class
@@ -83,7 +83,7 @@ cdef create_java_object(jobject obj):
         except Exception as ex: pass
     return cls.__new__(cls, JObject.create(env, obj))
 
-def java_class(class_name, *bases):
+def template(class_name, *bases):
     """Makes the decorated class a Java Class template with the given class name."""
     # Mostly inspired from six.add_metaclass
     def java_class_wrapper(cls):
@@ -108,7 +108,7 @@ class JavaClass(type):
 
     To use it, either be a sub-class of Object or have the JavaClass metaclass. In both cases
     you need the attribute __java_class_name__ which gives the fully qualified clsas name. These
-    can be accomplished by using the @java_class decorator. For non-interfaces the base classes
+    can be accomplished by using the @template decorator. For non-interfaces the base classes
     must be supplied to the decorator instead of the class itself.
 
     The actual subclasses and interfaces are added as necessary and do not need to be specified
@@ -476,7 +476,7 @@ cdef int init_objects(JEnv env) except -1:
     global classes; classes = dict()
 
     ### Core Classes and Interfaces ###
-    @java_class(u'java.lang.Object')
+    @template(u'java.lang.Object')
     class Object(object): # implements collections.Hashable
         """
         The base class of all Java objects. Interfaces are not subclasses of this, but any
@@ -677,20 +677,20 @@ cdef int init_objects(JEnv env) except -1:
         def __repr__(self):
             return u"<Java instance of '%s' at 0x%08x>" % (get_object_class(self).name, get_identity(self))
 
-    @java_class(u'java.lang.AutoCloseable')
+    @template(u'java.lang.AutoCloseable')
     class AutoCloseable(object):
         def __enter__(self): return self
         def __exit__(self ,type, value, traceback): self._jcall0(u'close'); return False
-    @java_class(u'java.lang.Cloneable')
+    @template(u'java.lang.Cloneable')
     class Cloneable(object):
         def __copy__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.clone, NULL, True)
-    @java_class(u'java.lang.Comparable')
+    @template(u'java.lang.Comparable')
     class Comparable(object):
         def __lt__(self, other): return self._jcall1(u'compareTo', other) < 0
         def __gt__(self, other): return self._jcall1(u'compareTo', other) > 0
         def __le__(self, other): return self._jcall1(u'compareTo', other) <= 0
         def __ge__(self, other): return self._jcall1(u'compareTo', other) >= 0
-    @java_class(u'java.lang.String', Object)
+    @template(u'java.lang.String', Object)
     class String(object):
         # This class template is never usuable since Strings are ALWAYS converted to unicode objects
         def __getitem__(self, i): return self._jcall1(u'charAt', i)
@@ -700,7 +700,7 @@ cdef int init_objects(JEnv env) except -1:
             def __str__(self): return PyUnicode_AsUTF8String(jenv().pystr(<jstring>get_object(self), False))
         ELSE:
             def __str__(self): return jenv().pystr(<jstring>get_object(self), False)
-    @java_class(u'java.lang.Enum', Object)
+    @template(u'java.lang.Enum', Object)
     class Enum(object):
         def __int__(self): return self._jcall0(u'ordinal')
         def __long__(self): return self._jcall0(u'ordinal')
@@ -710,7 +710,7 @@ cdef int init_objects(JEnv env) except -1:
 
     ### Exceptions ###
     def cls(cn, base): return JavaClass.__new__(JavaClass, cn, (Object,base), {'__java_class_name__':cn})
-    @java_class(u'java.lang.Throwable', Object, Exception)
+    @template(u'java.lang.Throwable', Object, Exception)
     class Throwable(object):
         IF PY_VERSION < PY_VERSION_3:
             def __unicode__(self): return self._jcall0(u'getLocalizedMessage')

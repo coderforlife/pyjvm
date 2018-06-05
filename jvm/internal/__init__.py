@@ -32,7 +32,7 @@ from .synth import *
 
 # The set of functions that should be publicly accessible
 publicfuncs = {
-    'get_java_class':get_java_class,'java_class':java_class,
+    'get_java_class':get_java_class,'template':template,
     'synchronized':synchronized,'unbox':unbox,'register_converter':register_converter,
     'JavaClass':JavaClass,'JavaMethods':JavaMethods,'JavaMethod':JavaMethod,'JavaConstructor':JavaConstructor,
     'boolean_array':boolean_array,'char_array':char_array,'object_array':object_array,

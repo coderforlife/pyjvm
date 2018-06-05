@@ -50,7 +50,7 @@ cdef struct JCollectionsDef:
 cdef JCollectionsDef CollectionsDef
 
 cdef int init_collections(JEnv env) except -1:
-    from .objects import java_class
+    from .objects import template
     
     # java.util.Collections utility class
     global Collections
@@ -67,32 +67,32 @@ cdef int init_collections(JEnv env) except -1:
     CollectionsDef.sort_c    = env.GetStaticMethodID(Collections, u'sort',      u'(Ljava/util/List;Ljava/util/Comparator;)V')
 
     ##### Object templates for basic collection classes #####
-    #@java_class(u'java.util.Comparator')
+    #@template(u'java.util.Comparator')
     #class Comparator(object): pass
-    @java_class(u'java.lang.Iterable')
+    @template(u'java.lang.Iterable')
     class Iterable(object): # implements collections.Iterable
         def __iter__(self): return self._jcall0(u'iterator')
-    @java_class(u'java.util.Enumeration')
+    @template(u'java.util.Enumeration')
     class Enumeration(object): # implements collections.Iterator
         def __iter__(self): return self
         def __next__(self):
             if not self._jcall0(u'hasMoreElements'): raise StopIteration()
             return self._jcall0(u'nextElement')
         IF PY_VERSION < PY_VERSION_3: next = __next__
-    @java_class(u'java.util.Iterator')
+    @template(u'java.util.Iterator')
     class Iterator(object): # implements collections.Iterator
         def __iter__(self): return self
         def __next__(self):
             if not self._jcall0(u'hasNext'): raise StopIteration()
             return self._jcall0(u'next')
         IF PY_VERSION < PY_VERSION_3: next = __next__
-    @java_class(u'java.util.Collection', Iterable)
+    @template(u'java.util.Collection', Iterable)
     class Collection(object): # implements collections.Sized and collections.Container
         def __contains__(self, value): return self._jcall1(u'contains', value)
         def __len__(self): return self._jcall0(u'size')
 
     ##### Object templates for the core collection types #####
-    @java_class(u'java.util.Set', Collection, Iterable)
+    @template(u'java.util.Set', Collection, Iterable)
     class Set(object): # implements collections.MutableSet
         def add(self, value): self._jcall1(u'add', value)
         def clear(self): self._jcall0(u'clear')
@@ -176,7 +176,7 @@ cdef int init_collections(JEnv env) except -1:
             finally:
                 if val[1].l is not NULL: env.DeleteLocalRef(val[1].l)
     
-    @java_class(u'java.util.List', Collection, Iterable)
+    @template(u'java.util.List', Collection, Iterable)
     class List(object): # implements collections.MutableSequence
         def __getitem__(self, i):
             if isinstance(i, slice):
@@ -263,7 +263,7 @@ cdef int init_collections(JEnv env) except -1:
             while it._jcall0(u'hasPrevious'): yield it._jcall0(u'previous')
 
     _no_arg = object()
-    @java_class(u'java.util.Map')
+    @template(u'java.util.Map')
     class Map(object): # implements collections.MutableMap
         def __contains__(self, key): return self._jcall1(u'containsKey', key)
         def __len__(self): return self._jcall0(u'size')
@@ -317,7 +317,7 @@ cdef int init_collections(JEnv env) except -1:
             itervalues = values
             iteritems = items
 
-    @java_class(u'java.util.Map$Entry')
+    @template(u'java.util.Map$Entry')
     class MapEntry(object):
         # Made to act like a tuple of (key, value)
         def __getitem__(self, i):
