@@ -465,7 +465,7 @@ cdef class DeleteGlobalRefAction(JVMAction):
     cpdef run(self, JEnv env):
         assert self.obj is not NULL
         env.DeleteGlobalRef(self.obj)
-cdef class DeleteGlobalRefAction(JVMAction):
+cdef class UnregisterNativesAction(JVMAction):
     """Calls UnregisterNatives on the object"""
     cpdef run(self, JEnv env):
         assert self.obj is not NULL
