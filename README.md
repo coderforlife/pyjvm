@@ -15,6 +15,8 @@ automatically found in an OS-depedent manner, but their location can also be spe
 `JDK_HOME` and `JAVA_HOME` environmental variables during setup and when running. `pip` can be
 used to install the package once these requirements are met.
 
+Once installed, only the JRE is needed. Cython and the JDK are not needed after installation.
+
 
 Getting Started
 ----------------
@@ -70,8 +72,8 @@ must be a URLClassLoader, which the HotSpot JVM uses by default.
 
 Java Modules
 ------------
-By default, only `java` and `javax` namespaces can be imported directly. But any name can be added
-to the list of base module names that it forwarded to Java packages. To do so use the following
+By default, only the `java` and `javax` namespaces can be imported directly. But any name can be
+added to the list of base module names that it forwarded to Java packages. To do so use the following
 function:
 
     jvm.register_module_name(name)
@@ -80,17 +82,16 @@ To see the list of registered names, call:
 
     names = jvm.get_module_names()
 
-Some common base names that might be added would be 'com' or 'org' if those are common beginnings
-of package names. These modules try to predict what classes and packages are nested under the
-package they represent. However, if the JVM (or the user) uses a non-`URLClassLoader` or the class
-loader has URLs that are not local files, those classes and packages will not be enumerated by
-`dir` on the module.
+Some common base names that might be added would be 'com' or 'org'. These modules try to predict
+what classes and packages are nested under the package they represent. However, if the JVM (or the
+user) uses a non-`URLClassLoader` or the class loader has URLs that are not local files, those
+classes and packages will not be enumerated by `dir` on the module.
 
 
 Java Classes
 ------------
 Within Python the type of Java objects are subclasses of `J.JavaClass`. Each instance of
-`JavaClass` represents a different Java class, and can be used in many places for an instance of
+`JavaClass` represents a different Java class, and can be used in sine places for an instance of
 `java.lang.Class`. When you get a class, like `java.lang.Object`, this is a `JavaClass`. The
 `JavaClass` objects also act as the holder for all of the static fields, methods, and nested
 classes. For example:
@@ -133,9 +134,9 @@ return the value from `j.hashCode()`, using `str(j)` on the instance calls `j.to
 more Python mappings. See [Predefined Class Templates](#predefined-class-templates) for more
 information.
 
-**Note:** unlike in Java, static methods and fields are inaccessible from instances, in Java this only
-produces a warning (and is strongly discouraged), here it is enforced; additionally, static members
-are only available on the class that declared them and are not inherited
+**Note:** unlike in Java, static methods and fields are inaccessible from instances, in Java this
+only produces a warning (and is strongly discouraged), here it is enforced; additionally, static
+members are only available on the class that declared them and are not inherited
 
 
 Java Methods and Constructors
@@ -276,15 +277,15 @@ Custom Class Templates
 ----------------------
 You can define additional class templates as well. One limitation though is that the class template
 must be defined before the Java class is ever used. To create a class template, create a new Python
-class that either has some other Java interface or class as a base or has the metaclass `JavaClass`.
-In either case, the class definition also requires a field `__java_class_name__` that is a unicode
-string with the full name of the class or interface. For example, the class template for
+class that uses the @jvm.template(class_name) decoractor. For example, the class template for
 `java.lang.Iterable` could be made as follows:
 
-    class Iterable(object):
-        __metaclass__ = JavaClass
-        __java_class_name__ = 'java.lang.Iterable'
+    @jvm.template('java.lang.Iterable')
+    class Iterable: # Python 2: must be a new-style class
         def __iter__(self): return self.iterator()
+
+Internally this is setting the metaclass to `JavaClass` and adding a `__java_class_name__` field
+which is an alternative to using the @jvm.template decorator. 
 
 The metaclass handles many aspects of the base classes for you. It will automatically add the
 superclass and any interfaces as bases if you do not include them. If you include a superclass,
@@ -302,12 +303,14 @@ influence on the Java code itself
 
 **Note:** if the class has already be used before you get a chance to create a template for it,
 the custom class template can still be created by monkey-patching the `JavaClass` object for the
-class.
+class, for example `super(type(java.lang.Iterable), java.lang.Iterable).__setattr__('__iter__',
+lambda self : self.iterator()` would accomplish the same thing as above. The convoluted attribute
+setting is due to `JavaClass` using `__setattr__` for setting static fields.
 
 
 Automatic Conversion
 --------------------
-PyJVM automatically converts arguments when calling Java methods are when setting a Java field
+PyJVM automatically converts arguments when calling Java methods and when setting a Java field
 value. If the method argument or field value is a primitive, the conversions follow these
 conversions:
 
@@ -361,7 +364,7 @@ The built-in object conversions are (in the order they are checked):
  * buffer-object or `memoryview` to a primitive array of the same type as given by the buffer's `format` and `itemsize`
 
 After the built-in converters are checked, custom converters are checked as well. A custom
-converter is added with the function `J.register_converter`. This function takes a Python
+converter is added with the function `jvm.register_converter`. This function takes a Python
 `type`, a `JavaClass`, and a `callable`. The given `callable` takes the Python object to be
 converted and the `JavaClass` we would like to convert to. The Python object to be converted
 is guaranteed to be an instance of the Python `type` given to `register_converter` (which
@@ -591,11 +594,11 @@ all of the methods and fields listed above must be used directly without introsp
 
 Other Methods
 -------------
-A few other methods and utilities are available in `J` module:
+A few other methods and utilities are available in the `J` and `jvm` modules:
 
- * `J.get_java_class(classname)` - Gets the `JavaClass` for a given fully-qualified Java class name
- * `with J.synchronized(obj): ...` - Equivilent of the Java `synchronized` block on the object
- * `J.unbox(obj)` - unboxes a Java primitive wrapper, or returns the object as-is if it isn't a wrapper
+ * `jvm.get_java_class(classname)` - Gets the `JavaClass` for a given fully-qualified Java class name
+ * `with jvm.synchronized(obj): ...` - Equivilent of the Java `synchronized` block on the object
+ * `jvm.unbox(obj)` - unboxes a Java primitive wrapper, or returns the object as-is if it isn't a wrapper
 
 
 Planned Future Enhancements
@@ -614,8 +617,9 @@ Planned Future Enhancements
    `dict` objects to act as `java.util.List`, `java.util.Set`, and `java.util.Map` objects
  * Re-route `System.out`, `System.err`, and `System.in` to Python `sys.stdout`, `sys.stderr`, and `sys.stdin`
  * Make Java annotations work like Python decorators
- * Pickling of `java.lang.Serializable` objects 
+ * Pickling of `java.lang.Serializable` objects
  * Generic types
+ * Modules for package and class discovery (new Java 9)
 
 Thoughts:
  * Should all JObjects be dealloced before JVM deallocs?
