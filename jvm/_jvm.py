@@ -152,8 +152,12 @@ def __start_core(prefer, opts):
     signal.signal(signal.SIGINT, signal.default_int_handler)
     # TODO: SIGHUP, SIGTERM, SIGQUIT?
     
-    # Add the super-module
+    # Add the super-module and some imports to the jvm package
+    # TODO: the jvm.internal ones should have proxies in the jvm module before this that trigger
+    # a _start_if_needed and then are replaced.
     sys.modules[JavaImporter._mod_super] = JavaPackage('')
+    import jvm.internal, jvm
+    for f in jvm.internal.jvm_publicfuncs: setattr(jvm, f, getattr(jvm.internal, f))
     
 def _start_if_needed():
     """Starts the JVM only if not already started."""

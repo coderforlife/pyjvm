@@ -31,6 +31,11 @@ from .collections import *
 from .synth import *
 
 # The set of functions that should be publicly accessible
+jvm_publicfuncs = {
+    'get_java_class':get_java_class,'template':template,
+    'synchronized':synchronized,'unbox':unbox,'register_converter':register_converter,
+    'JavaClass':JavaClass,'JavaMethods':JavaMethods,'JavaMethod':JavaMethod,'JavaConstructor':JavaConstructor
+}
 publicfuncs = {
     'get_java_class':get_java_class,'template':template,
     'synchronized':synchronized,'unbox':unbox,'register_converter':register_converter,
