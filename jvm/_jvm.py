@@ -146,6 +146,11 @@ def __start_core(prefer, opts):
     jvm.check_pending_exception()
     global __jvm
     __jvm = jvm
+
+    # Java messes with our signals so we need to restore them
+    import signal
+    signal.signal(signal.SIGINT, signal.default_int_handler)
+    # TODO: SIGHUP, SIGTERM, SIGQUIT?
     
     # Add the super-module
     sys.modules[JavaImporter._mod_super] = JavaPackage('')
@@ -155,7 +160,8 @@ def _start_if_needed():
     # The conditional here is just to skip the common case of definitely started. A more robust
     # check for it already being started is through the exception handler.
     if __jvm is None:
-        opts = [] if len(__class_paths) == 0 else ['-Djava.class.path='+os.pathsep.join(__class_paths)]
+        from os import pathsep
+        opts = [] if len(__class_paths) == 0 else ['-Djava.class.path='+pathsep.join(__class_paths)]
         try: __start_core(None, opts)
         except RuntimeError: pass
 
