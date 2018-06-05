@@ -1,12 +1,12 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 
 # C extensions
 *.so
-jvm/_internal.c
-jvm/config.pxi
+*.c
+config.pxi
 
 # Distribution / packaging
 .Python
@@ -35,6 +35,7 @@ var/
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+hs*.log
 
 # Unit test / coverage reports
 htmlcov/
