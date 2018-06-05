@@ -47,7 +47,7 @@ Internal function types:
     jvm_hook - the type of functions given to jvm_add_<when>_hook()
 
 FUTURE:
-    hook JVM exit and abort?
+    fix JVM exit and abort hooks to allow GIL
 """
 
 #from __future__ import absolute_import
@@ -193,20 +193,22 @@ cdef class JVM(object):
                     import warnings
                     warnings.warn(u'Java VM already created so specified options are ignored', RuntimeWarning)
                 self.__attach(env)
-                # TODO: should this quit now?
             else:
-                # TODO: hook exit and abort
                 args.version = JNI_VERSION
                 args.ignoreUnrecognized = False
                 if len(options) > 0x7FFFFFFF: raise OverflowError()
-                args.nOptions = <jint>(len(options)+1)
+                args.nOptions = <jint>(len(options)+3)
                 args.options = <JavaVMOption*>malloc(sizeof(JavaVMOption)*args.nOptions)
                 if args.options == NULL: raise MemoryError(u'Unable to allocate JavaVMInitArgs memory')
                 options = [any_to_utf8j(option) for option in options]
-                for i,opt in enumerate(options,1): args.options[i].optionString = opt
+                for i,opt in enumerate(options,3): args.options[i].optionString = opt
                 with nogil:
                     args.options[0].optionString = b'vfprintf'
                     args.options[0].extraInfo    = <void*>vfprintf_hook
+                    args.options[1].optionString = b'exit'
+                    args.options[1].extraInfo    = <void*>jvm_exit_hook
+                    args.options[2].optionString = b'abort'
+                    args.options[2].extraInfo    = <void*>jvm_abort_hook
                     retval = JNI_CreateJavaVM(&self.jvm, <void**>&env.env, &args)
                     free(args.options)
                 raise_jni_err(u'Failed to create Java VM', retval)
@@ -235,7 +237,7 @@ cdef class JVM(object):
             self.main_thread = None
             self.exc = ex
             self.tb = sys.exc_info()[2]
-            return None
+            return
 
         # Started!
         finally: start_event.set()
@@ -419,6 +421,17 @@ cdef int vfprintf_hook(FILE *stream, const char * format, va_list arg) nogil:
     return retval
 
 
+########## exit and abort JVM hooks ##########
+# TODO: these "work" but can only use the GIL if the JVM is not being exited due to a non-GIL
+# releasing function, which is the default behavior. A different solution will be needed to allow
+# GIL activities to occur here... it is possible that the vfprintf hook also doesn't work for the
+# same reason.
+cdef void jvm_exit_hook(jint code) nogil:
+    pass
+cdef void jvm_abort_hook() nogil:
+    pass
+
+        
 ########## JVM Handling ##########
 def jvm_get_default_options():
     """
