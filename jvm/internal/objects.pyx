@@ -205,6 +205,7 @@ class JavaClass(type):
         issues with ambiguous constructors then use [...] on the class to select a constructor.
         """
         cdef JClass clazz = self.__jclass__
+        if clazz.is_interface(): raise TypeError(u'Cannot instantiate interfaces')
         if clazz.is_abstract(): raise TypeError(u'Cannot instantiate abstract classes')
         if hasattr(self, '__self__'): args = (self.__self__,) + tuple(args)
         cdef JEnv env = jenv()
@@ -244,6 +245,7 @@ class JavaClass(type):
             if ind.start is not None or ind.stop is not None or ind.step is not None:
                 raise ValueError(u'Slice can only be an empty slice')
             return get_java_class(JObjectArray.get_objarr_classname(clazz))
+        if clazz.is_interface(): raise TypeError(u'Cannot instantiate interfaces')
         if clazz.is_abstract(): raise TypeError(u'Cannot instantiate abstract classes')
         cdef list ctors = clazz.constructors
         cdef bint bound = hasattr(self, '__self__')
@@ -256,6 +258,7 @@ class JavaClass(type):
     def __iter__(self):
         """Iterates over the constructors of the class, yielding JavaConstructor objects."""
         cdef JClass clazz = self.__jclass__
+        if clazz.is_interface(): raise TypeError(u'Cannot instantiate interfaces')
         if clazz.is_abstract(): raise TypeError(u'Cannot instantiate abstract classes')
         cdef JMethod m
         for m in clazz.constructors: yield JavaConstructor(self, m, getattr(self, '__self__', None))
@@ -743,6 +746,7 @@ cdef int init_objects(JEnv env) except -1:
     cls(u'java.io.IOError',                    IOError)
     cls(u'java.io.EOFException',               EOFError)
     # NameError
+    cls(u'java.lang.NoClassDefFoundError',    NameError)
     cls(u'java.lang.ClassNotFoundException',  NameError)
     cls(u'java.lang.TypeNotPresentException', NameError)
     # AttributeError

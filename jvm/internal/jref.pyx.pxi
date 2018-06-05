@@ -250,7 +250,7 @@ cdef void dealloc_FileDef(JNIEnv* env) nogil:
     if URIDef.clazz is not NULL: DeleteGlobalRef(env, URIDef.clazz)
     URIDef.clazz = NULL
     URIDef.toURL = NULL
-    
+
 cdef void init_PackageDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/Package')
     PackageDef.clazz      = <jclass>NewGlobalRef(env, C)
@@ -279,6 +279,7 @@ cdef void init_ClassDef(JNIEnv* env) nogil:
     #ClassDef.getSuperclass      = GetMethodID(env, C, b'getSuperclass', b'()Ljava/lang/Class;') # use JNI directly instead
     ClassDef.getInterfaces      = GetMethodID(env, C, b'getInterfaces', b'()[Ljava/lang/Class;')
     ClassDef.isInterface        = GetMethodID(env, C, b'isInterface', b'()Z')
+    #ClassDef.isAnnotation       = GetMethodID(env, C, b'isAnnotation', b'()Z')
     #ClassDef.isPrimitive        = GetMethodID(env, C, b'isPrimitive', b'()Z') # primitives are handled specially instead
     ClassDef.isEnum             = GetMethodID(env, C, b'isEnum', b'()Z')
     ClassDef.isArray            = GetMethodID(env, C, b'isArray', b'()Z')
@@ -307,6 +308,7 @@ cdef void dealloc_ClassDef(JNIEnv* env) nogil:
     ClassDef.getDeclaredClasses = NULL
     ClassDef.getInterfaces      = NULL
     ClassDef.isInterface        = NULL
+    #ClassDef.isAnnotation       = NULL
     ClassDef.isEnum             = NULL
     ClassDef.isArray            = NULL
     ClassDef.getComponentType   = NULL
@@ -507,10 +509,11 @@ cdef class JClass(object):
         c.identity = env.CallStaticInt(SystemDef.clazz, SystemDef.identityHashCode, &val)
         c.name = name
         c.simple_name = env.CallString(clazz, ClassDef.getSimpleName)
-        if   env.CallBoolean(clazz, ClassDef.isArray):     c.type = CT_ARRAY
-        elif env.CallBoolean(clazz, ClassDef.isInterface): c.type = CT_INTERFACE
-        elif env.CallBoolean(clazz, ClassDef.isEnum):      c.type = CT_ENUM
-        #elif env.CallBoolean(clazz, ClassDef.isPrimitive): c.type = CT_PRIMITIVE
+        if   env.CallBoolean(clazz, ClassDef.isArray):      c.type = CT_ARRAY
+        #elif env.CallBoolean(clazz, ClassDef.isAnnotation): c.type = CT_ANNOTATION
+        elif env.CallBoolean(clazz, ClassDef.isInterface):  c.type = CT_INTERFACE
+        elif env.CallBoolean(clazz, ClassDef.isEnum):       c.type = CT_ENUM
+        #elif env.CallBoolean(clazz, ClassDef.isPrimitive):  c.type = CT_PRIMITIVE
         if   env.CallBoolean(clazz, ClassDef.isAnonymousClass): c.mode = CM_ANONYMOUS
         elif env.CallBoolean(clazz, ClassDef.isLocalClass):     c.mode = CM_LOCAL
         elif env.CallBoolean(clazz, ClassDef.isMemberClass):    c.mode = CM_MEMBER
@@ -619,8 +622,10 @@ cdef class JMethod(object):
             m.is_var_args = env.CallBoolean(method, MethodDef.isVarArgs)
             #m.is_synthetic = env.CallBoolean(method, MethodDef.isSynthetic)
             #m.is_bridge = env.CallBoolean(method, MethodDef.isBridge)
+            m.declaring_class = env.CallClass(method, MethodDef.getDeclaringClass)
             m.return_type = env.CallClass(method, MethodDef.getReturnType)
             m.param_types = call2list(env, method, MethodDef.getParameterTypes, <obj2py>JClass.get)
+            m.exc_types = call2list(env, method, MethodDef.getExceptionTypes, <obj2py>JClass.get)
         finally: env.DeleteRef(method)
         return m
     @staticmethod
@@ -633,8 +638,10 @@ cdef class JMethod(object):
             c.modifiers = <Modifiers>env.CallInt(ctor, ConstructorDef.getModifiers)
             c.is_var_args = env.CallBoolean(ctor, ConstructorDef.isVarArgs)
             #c.is_synthetic = env.CallBoolean(ctor, ConstructorDef.isSynthetic)
+            c.declaring_class = env.CallClass(ctor, ConstructorDef.getDeclaringClass)
             c.return_type = None
             c.param_types = call2list(env, ctor, ConstructorDef.getParameterTypes, <obj2py>JClass.get)
+            c.exc_types = call2list(env, ctor, ConstructorDef.getExceptionTypes, <obj2py>JClass.get)
         finally: env.DeleteRef(ctor)
         return c
     @staticmethod
@@ -661,6 +668,7 @@ cdef class JField(object):
             f.name = env.CallString(field, FieldDef.getName)
             f.modifiers = <Modifiers>env.CallInt(field, FieldDef.getModifiers)
             #f.is_synthetic = env.CallBoolean(field, FieldDef.isSynthetic)
+            f.declaring_class = env.CallClass(field, FieldDef.getDeclaringClass)
             f.type = env.CallClass(field, FieldDef.getType)
         finally: env.DeleteRef(field)
         return f

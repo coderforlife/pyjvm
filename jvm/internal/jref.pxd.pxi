@@ -36,17 +36,17 @@ cdef enum Modifiers:        # allowed on Interface, Class, Constructor, Method, 
     SYNCHRONIZED = 0x0020   #    M   (ignored)
     SUPER        = 0x0020	#  C     (ignored, undocumented in reflection)
     VOLATILE     = 0x0040   #     F  (ignored)
-    BRIDGE       = 0x0040   #    M   (ignored, undocumented in reflection)
+    BRIDGE       = 0x0040   #    M   (ignored, reflection uses a method)
     TRANSIENT    = 0x0080   #     F  (ignored)
-    VARARGS      = 0x0080   #   CM   (ignored, undocumented in reflection)
+    VARARGS      = 0x0080   #   CM   (ignored, reflection uses a method)
     NATIVE       = 0x0100   #    M   (ignored)
-    INTERFACE    = 0x0200   # I      (ignored)
-    ABSTRACT     = 0x0400   # IC M   (ignored)
-    STRICT       = 0x0800   # ICCM   (ignored)
-    SYNTHETIC    = 0x1000   # ICCMF  (ignored, undocumented in reflection)
-    ANNOTATION   = 0x2000   # I      (ignored, undocumented in reflection)
-    ENUM         = 0x4000   #  C  F  (ignored, undocumented in reflection)
-    #MANDATED    = 0x8000   # ?????  (ignored, undocumented)
+    INTERFACE    = 0x0200   # I
+    ABSTRACT     = 0x0400   # IC M
+    STRICT       = 0x0800   #   CM   (ignored)
+    SYNTHETIC    = 0x1000   # ICCMF  (ignored, reflection uses a method)
+    ANNOTATION   = 0x2000   # I      (ignored, reflection uses a method)
+    ENUM         = 0x4000   #  C  F  (ignored, reflection uses a method)
+    #MODULE = 0x8000 # (ignored, new in Java 9, gives a new introspection system)
 
 
 ########## Java Class Functions ##########
@@ -104,7 +104,7 @@ cdef struct JClassDef:
     jclass clazz
     jmethodID getName, getSimpleName, getPackage, getEnclosingClass, getDeclaringClass, getModifiers
     jmethodID getDeclaredFields, getDeclaredMethods, getDeclaredConstructors, getDeclaredClasses
-    jmethodID getInterfaces, isInterface, isEnum, isArray, getComponentType
+    jmethodID getInterfaces, isInterface, isEnum, isArray, getComponentType #, isAnnotation
     jmethodID isAnonymousClass, isLocalClass, isMemberClass #, isSynthetic
 cdef struct JFieldDef:
     jclass clazz
@@ -200,22 +200,32 @@ cdef inline unicode protection_prefix(Modifiers mod):
     if   mod & PUBLIC:    return u''
     elif mod & PROTECTED: return u'_'
     else:                 return u'__' # private OR package-private
-    
-cdef class JClass(object):
+
+cdef class JBase(object):
+    cdef readonly unicode name
+    cdef Modifiers modifiers
+        # In general one of PUBLIC, PRIVATE, PROTECTED then some combination of:
+        # Interfaces:   STATIC | ABSTRACT
+        # Classes:      STATIC | ABSTRACT | FINAL
+        # Constructors: STRICT
+        # Methods:      STATIC | ABSTRACT | STRICT | FINAL | SYNCHRONIZED | NATIVE
+        # Fields:       STATIC | FINAL | VOLATILE | TRANSIENT
+    #cdef bint is_synthetic
+    cdef JClass declaring_class # None for anonymous and local classes, enclosing class always works
+    cdef inline Modifiers access(self): return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
+    cdef inline bint is_static(self): return (self.modifiers & STATIC)   == STATIC
+    cdef inline bint is_final(self):  return (self.modifiers & FINAL)    == FINAL
+
+cdef class JClass(JBase):
     """Wrapper around a jclass pointer along with several properties of the class"""
     cdef JClassFuncs* funcs
     cdef jclass clazz
     cdef int identity # from System.identityHashCode
-    cdef readonly unicode name
     cdef unicode simple_name
     cdef ClassType type
     cdef ClassMode mode
-    #cdef bint is_synthetic
     cdef unicode package_name
     cdef JClass enclosing_class
-    cdef JClass declaring_class # null for anonymous and local classes, enclosing class always works
-    cdef Modifiers modifiers # mask = PUBLIC | PRIVATE | PROTECTED | STATIC | ABSTRACT | STRICT (for interfaces)
-        # mask |= FINAL (for classes)
     cdef JClass component_type # None for all classes except arrays
     cdef JClass superclass   # None for base interfaces, primitive, and the Object type
     cdef list interfaces     # list of JClass
@@ -231,19 +241,16 @@ cdef class JClass(object):
     cdef inline unicode sig(self):
         if self.is_primitive(): return unichr(self.funcs.sig)
         return self.name if self.is_array() else (u'L%s;' % self.name)
-    cdef inline bint is_interface(self):    return self.type == CT_INTERFACE
-    cdef inline bint is_primitive(self):    return self.type == CT_PRIMITIVE
-    cdef inline bint is_array(self):        return self.type == CT_ARRAY
-    cdef inline bint is_enum(self):         return self.type == CT_ENUM
-    cdef inline bint is_anonymous(self):    return self.mode == CM_ANONYMOUS
-    cdef inline bint is_local(self):        return self.mode == CM_LOCAL
-    cdef inline bint is_member(self):       return self.mode == CM_MEMBER # either a static nested or inner class
-    cdef inline bint is_nested(self):       return self.mode != 0
-    cdef inline Modifiers get_access(self): return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
-    cdef inline bint is_static(self):       return (self.modifiers & STATIC)   == STATIC
-    cdef inline bint is_final(self):        return (self.modifiers & FINAL)    == FINAL
-    cdef inline bint is_abstract(self):     return (self.modifiers & ABSTRACT) == ABSTRACT
-    cdef inline bint is_strict(self):       return (self.modifiers & STRICT)   == STRICT
+    #cdef inline bint is_annotation(self):   return self.type == CT_ANNOTATION
+    cdef inline bint is_interface(self): return self.type == CT_INTERFACE # or self.type == CT_ANNOTATION
+    cdef inline bint is_primitive(self): return self.type == CT_PRIMITIVE
+    cdef inline bint is_array(self):     return self.type == CT_ARRAY
+    cdef inline bint is_enum(self):      return self.type == CT_ENUM
+    cdef inline bint is_anonymous(self): return self.mode == CM_ANONYMOUS
+    cdef inline bint is_local(self):     return self.mode == CM_LOCAL
+    cdef inline bint is_member(self):    return self.mode == CM_MEMBER # either a static nested or inner class
+    cdef inline bint is_nested(self):    return self.mode != 0
+    cdef inline bint is_abstract(self):  return (self.modifiers & ABSTRACT) == ABSTRACT
 
     @staticmethod
     cdef JClass named(JEnv env, unicode name)
@@ -278,28 +285,26 @@ cdef class JClass(object):
     cdef inline is_sub(self, JEnv env, JClass b): return env.IsAssignableFrom(self.clazz, b.clazz)
     cdef inline is_same(self, JEnv env, JClass b): return env.IsSameObject(self.clazz, b.clazz)
 
-cdef class JMethod(object):
+cdef class JMethod(JBase):
     """Wrapper around a jmethodID along with several properties of the method/constructor"""
     cdef jmethodID id
-    cdef readonly unicode name
-    cdef Modifiers modifiers # mask = PUBLIC | PRIVATE | PROTECTED (for constructors)
-        # mask |= STATIC | FINAL | SYNCHRONIZED | NATIVE | ABSTRACT | STRICT (for methods)
     cdef JClass return_type # None if it is a constructor
-    cdef list param_types # list of JClass
-    cdef bint is_var_args #, is_synthetic, is_bridge
+    cdef list param_types, exc_types # lists of JClass
+    cdef bint is_var_args #, is_bridge
     cdef inline unicode attr_name(self):    return protection_prefix(self.modifiers) + self.name
     cdef inline unicode param_sig(self):
         cdef JClass t
         return u''.join([t.sig() for t in self.param_types])
+    cdef inline bint is_ctor(self):         return self.return_type is None # TODO: need: and (self.name == u"<init>" or self.name == u"<clinit>") ?
     cdef inline unicode return_sig(self):   return u'V' if self.return_type is None else self.return_type.sig()
     cdef inline unicode sig(self):          return u'(%s)%s' % (self.param_sig(), self.return_sig())
-    cdef inline Modifiers get_access(self): return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
-    cdef inline bint is_static(self):       return (self.modifiers & STATIC)   == STATIC
-    cdef inline bint is_final(self):        return (self.modifiers & FINAL)    == FINAL
     cdef inline bint is_synchronized(self): return (self.modifiers & SYNCHRONIZED) == SYNCHRONIZED
     cdef inline bint is_native(self):       return (self.modifiers & NATIVE)   == NATIVE
     cdef inline bint is_abstract(self):     return (self.modifiers & ABSTRACT) == ABSTRACT
     cdef inline bint is_strict(self):       return (self.modifiers & STRICT)   == STRICT
+    # In Java 1.8+ interfaces can have "default" methods. Could use Method.isDefault() but this
+    # does the same thing and works in all versions of Java (will always be False prior to 1.8).
+    cdef inline bint is_default(self):      return (self.modifiers&(PUBLIC|ABSTRACT|STATIC)) == PUBLIC and self.declaring_class.is_interface()
     @staticmethod
     cdef JMethod create(JEnv env, jobject method)
     @staticmethod
@@ -307,19 +312,13 @@ cdef class JMethod(object):
     @staticmethod
     cdef dict group(list methods)
 
-cdef class JField(object):
+cdef class JField(JBase):
     """Wrapper around a jfieldID pointer along with several properties of the field"""
     cdef jfieldID id
-    cdef readonly unicode name
-    cdef Modifiers modifiers # mask = PUBLIC | PRIVATE | PROTECTED | STATIC | FINAL | VOLATILE | TRANSIENT
-    #cdef bint is_synthetic
     cdef JClass type
-    cdef inline unicode attr_name(self):    return protection_prefix(self.modifiers) + self.name
-    cdef inline Modifiers get_access(self): return <Modifiers>(self.modifiers&(PUBLIC|PRIVATE|PROTECTED))
-    cdef inline bint is_static(self):       return (self.modifiers & STATIC)    == STATIC
-    cdef inline bint is_final(self):        return (self.modifiers & FINAL)     == FINAL
-    cdef inline bint is_volatile(self):     return (self.modifiers & VOLATILE)  == VOLATILE
-    cdef inline bint is_transient(self):    return (self.modifiers & TRANSIENT) == TRANSIENT
+    cdef inline unicode attr_name(self): return protection_prefix(self.modifiers) + self.name
+    cdef inline bint is_volatile(self):  return (self.modifiers & VOLATILE)  == VOLATILE
+    cdef inline bint is_transient(self): return (self.modifiers & TRANSIENT) == TRANSIENT
     @staticmethod
     cdef JField create(JEnv env, jobject field)
 
@@ -347,7 +346,7 @@ cdef class JObject(object):
         val.l = self.obj
         return jenv().CallStaticInt(SystemDef.clazz, SystemDef.identityHashCode, &val)
 
-        
+
 ########## Type Boxing Support ##########
 cdef jobject Boolean_TRUE, Boolean_FALSE
 cdef jclass box_classes[8]
