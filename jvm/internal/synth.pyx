@@ -140,10 +140,10 @@ cdef class ConstantPool(object):
     cdef inline uint16_t invoke_dynamic(self, uint16_t bootstrap_mthd_attr_idx, JMethod method) except? 0xFFFF:
         return self.__get(b'\x12'+u2(bootstrap_mthd_attr_idx)+self.nt_method(method))
 
-cdef random_string(n=20):
+cdef random_string():
     import random, string
     opts = string.ascii_letters + string.digits
-    return u''.join(random.choice(opts) for _ in range(n))
+    return u''.join(random.choice(opts) for _ in range(20))
         
 cdef bint class_exists(JEnv env, unicode name):
     """Checks if a class already exists with the given name."""
