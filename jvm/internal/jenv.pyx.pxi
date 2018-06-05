@@ -30,6 +30,9 @@ Internal classes:
 Internal functions:
     jenv() - gets the current thread's JEnv variable, creating it as necessary
     py2<primitive>(...) - converts a Python object to a specific Java primitive
+    
+FUTURE:
+    modify traceback of exceptions to show Java information
 """
 
 #from __future__ import absolute_import
@@ -115,6 +118,8 @@ cdef class JEnv(object):
         Raises the current exception from the JVM as a Python exception. Does not check if these is
         an exception to be raised, just does it.
         """
+        # TODO: remove one or two frames off the bottom of the traceback and then add the Java
+        # stack trace onto it
         cdef jthrowable t = self.env[0].ExceptionOccurred(self.env)
         #self.env[0].ExceptionDescribe(self.env)
         self.env[0].ExceptionClear(self.env)
@@ -127,14 +132,14 @@ cdef class JEnv(object):
         return version
 
     # Class Operations
-    cdef jobject DefineClass(self, unicode name, jobject loader, bytes buf):
+    cdef jobject DefineClass(self, unicode name, jobject loader, bytes buf) except NULL:
         assert buf is not None
         cdef jclass clazz
         if name is None:
             clazz = self.env[0].DefineClass(self.env, NULL, loader, buf, <jsize>len(buf))
         else:
             clazz = self.env[0].DefineClass(self.env, to_utf8j(name.replace(u'.', u'/')), loader, buf, <jsize>len(buf))
-        if clazz is NULL: self.check_exc()
+        if clazz is NULL: self.__raise_exception()
         return clazz
     #cdef inline jclass FindClass(self, unicode name) except NULL:
     #cdef inline jclass GetSuperclass(self, jclass clazz) except? NULL:
@@ -180,17 +185,17 @@ cdef class JEnv(object):
     #cdef inline int DeleteWeakGlobalRef(self, jweak obj) except -1:
 
     # Object Operations
-    cdef jobject AllocObject(self, jclass clazz):
+    cdef jobject AllocObject(self, jclass clazz) except NULL:
         assert clazz is not NULL
         cdef jobject obj = self.env[0].AllocObject(self.env, clazz)
-        if obj is NULL: self.check_exc()
+        if obj is NULL: self.__raise_exception()
         return obj
     cdef jobject NewObject(self, jclass clazz, jmethodID methodID, const jvalue *args=NULL, bint withgil=True) except NULL:
         assert clazz is not NULL and methodID is not NULL
         cdef PyThreadState* gilstate = NULL if withgil else PyEval_SaveThread()
         cdef jobject out = self.env[0].NewObjectA(self.env, clazz, methodID, args)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     #cdef inline jclass GetObjectClass(self, jobject obj) except NULL:
     IF JNI_VERSION >= JNI_VERSION_1_6:
@@ -205,7 +210,7 @@ cdef class JEnv(object):
     cdef jfieldID GetFieldID(self, jclass clazz, unicode name, unicode sig) except NULL:
         assert clazz is not NULL
         cdef jfieldID out = self.env[0].GetFieldID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
 
     cdef object GetObjectField(self, jobject obj, jfieldID fieldID):
@@ -306,7 +311,7 @@ cdef class JEnv(object):
     cdef jmethodID GetMethodID(self, jclass clazz, unicode name, unicode sig) except NULL:
         assert clazz is not NULL
         cdef jmethodID out = self.env[0].GetMethodID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
 
     cdef object CallObjectMethod(self, jobject obj, jmethodID method, const jvalue *args, bint withgil):
@@ -455,7 +460,7 @@ cdef class JEnv(object):
     cdef jfieldID GetStaticFieldID(self, jclass clazz, unicode name, unicode sig) except NULL:
         assert clazz is not NULL
         cdef jfieldID out = self.env[0].GetStaticFieldID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
 
     cdef object GetStaticObjectField(self, jclass clazz, jfieldID fieldID):
@@ -556,7 +561,7 @@ cdef class JEnv(object):
     cdef jmethodID GetStaticMethodID(self, jclass clazz, unicode name, unicode sig) except NULL:
         assert clazz is not NULL
         cdef jmethodID out = self.env[0].GetStaticMethodID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef object CallStaticObjectMethod(self, jclass clazz, jmethodID method, const jvalue *args, bint withgil):
         assert clazz is not NULL and method is not NULL
@@ -634,31 +639,31 @@ cdef class JEnv(object):
     cdef jsize GetStringLength(self, jstring string) except -1:
         assert string is not NULL
         cdef jsize out = self.env[0].GetStringLength(self.env, string)
-        if out < 0: self.check_exc()
+        if out < 0: self.__raise_exception()
         return out
     cdef const jchar *GetStringChars(self, jstring string, jboolean *isCopy=NULL) except NULL:
         assert string is not NULL
         cdef const jchar *out = self.env[0].GetStringChars(self.env, string, isCopy)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef void ReleaseStringChars(self, jstring string, const jchar *chars):
         assert string is not NULL and chars is not NULL
         self.env[0].ReleaseStringChars(self.env, string, chars)
         #self.check_exc() # This is usually in the finally clause, don't check for errors
-    cdef jstring NewStringUTF(self, unicode s) except NULL:
+    cdef jstring NewStringUTF(self, unicode s) except? NULL:
         if s is None: return NULL
         cdef jstring string = self.env[0].NewStringUTF(self.env, to_utf8j(s))
-        if string is NULL: self.check_exc()
+        if string is NULL: self.__raise_exception()
         return string
     cdef jsize GetStringUTFLength(self, jstring string) except -1:
         assert string is not NULL
         cdef jsize out = self.env[0].GetStringUTFLength(self.env, string)
-        if out < 0: self.check_exc()
+        if out < 0: self.__raise_exception()
         return out
     cdef const char *GetStringUTFChars(self, jstring string, jboolean *isCopy=NULL) except NULL:
         assert string is not NULL
         cdef const char *out = self.env[0].GetStringUTFChars(self.env, string, isCopy)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef void ReleaseStringUTFChars(self, jstring string, const char *utf):
         assert string is not NULL and utf is not NULL
@@ -677,7 +682,7 @@ cdef class JEnv(object):
     cdef const jchar *GetStringCritical(self, jstring string, jboolean *isCopy=NULL) except NULL:
         assert string is not NULL
         cdef const jchar *out = self.env[0].GetStringCritical(self.env, string, isCopy)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef void ReleaseStringCritical(self, jstring string, const jchar *carray):
         assert string is not NULL and carray is not NULL
@@ -692,42 +697,42 @@ cdef class JEnv(object):
     cdef jbooleanArray NewBooleanArray(self, jsize length) except NULL:
         assert length >= 0
         cdef jbooleanArray out = self.env[0].NewBooleanArray(self.env, length)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jbyteArray NewByteArray(self, jsize length) except NULL:
         assert length >= 0
         cdef jbyteArray out = self.env[0].NewByteArray(self.env, length)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jcharArray NewCharArray(self, jsize length) except NULL:
         assert length >= 0
         cdef jcharArray out = self.env[0].NewCharArray(self.env, length)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jshortArray NewShortArray(self, jsize length) except NULL:
         assert length >= 0
         cdef jshortArray out = self.env[0].NewShortArray(self.env, length)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jintArray NewIntArray(self, jsize length) except NULL:
         assert length >= 0
         cdef jintArray out = self.env[0].NewIntArray(self.env, length)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jlongArray NewLongArray(self, jsize length) except NULL:
         assert length >= 0
         cdef jlongArray out = self.env[0].NewLongArray(self.env, length)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jfloatArray NewFloatArray(self, jsize length) except NULL:
         assert length >= 0
         cdef jfloatArray out = self.env[0].NewFloatArray(self.env, length)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jdoubleArray NewDoubleArray(self, jsize length) except NULL:
         assert length >= 0
         cdef jdoubleArray out = self.env[0].NewDoubleArray(self.env, length)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
 
     cdef jboolean *GetBooleanArrayElements(self, jbooleanArray array, jboolean *isCopy, jsize len) except NULL:
@@ -735,56 +740,56 @@ cdef class JEnv(object):
         cdef PyThreadState* gilstate = NULL if len < 8192//sizeof(jboolean) else PyEval_SaveThread()
         cdef jboolean *out = self.env[0].GetBooleanArrayElements(self.env, array, isCopy)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jbyte *GetByteArrayElements(self, jbyteArray array, jboolean *isCopy, jsize len) except NULL:
         assert array is not NULL
         cdef PyThreadState* gilstate = NULL if len < 8192//sizeof(jbyte) else PyEval_SaveThread()
         cdef jbyte *out = self.env[0].GetByteArrayElements(self.env, array, isCopy)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jchar *GetCharArrayElements(self, jcharArray array, jboolean *isCopy, jsize len) except NULL:
         assert array is not NULL
         cdef PyThreadState* gilstate = NULL if len < 8192//sizeof(jchar) else PyEval_SaveThread()
         cdef jchar *out = self.env[0].GetCharArrayElements(self.env, array, isCopy)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jshort *GetShortArrayElements(self, jshortArray array, jboolean *isCopy, jsize len) except NULL:
         assert array is not NULL
         cdef PyThreadState* gilstate = NULL if len < 8192//sizeof(jshort) else PyEval_SaveThread()
         cdef jshort *out = self.env[0].GetShortArrayElements(self.env, array, isCopy)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jint *GetIntArrayElements(self, jintArray array, jboolean *isCopy, jsize len) except NULL:
         assert array is not NULL
         cdef PyThreadState* gilstate = NULL if len < 8192//sizeof(jint) else PyEval_SaveThread()
         cdef jint *out = self.env[0].GetIntArrayElements(self.env, array, isCopy)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jlong *GetLongArrayElements(self, jlongArray array, jboolean *isCopy, jsize len) except NULL:
         assert array is not NULL
         cdef PyThreadState* gilstate = NULL if len < 8192//sizeof(jlong) else PyEval_SaveThread()
         cdef jlong *out = self.env[0].GetLongArrayElements(self.env, array, isCopy)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jfloat *GetFloatArrayElements(self, jfloatArray array, jboolean *isCopy, jsize len) except NULL:
         assert array is not NULL
         cdef PyThreadState* gilstate = NULL if len < 8192//sizeof(jfloat) else PyEval_SaveThread()
         cdef jfloat *out = self.env[0].GetFloatArrayElements(self.env, array, isCopy)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jdouble *GetDoubleArrayElements(self, jdoubleArray array, jboolean *isCopy, jsize len) except NULL:
         assert array is not NULL
         cdef PyThreadState* gilstate = NULL if len < 8192//sizeof(jdouble) else PyEval_SaveThread()
         cdef jdouble *out = self.env[0].GetDoubleArrayElements(self.env, array, isCopy)
         if gilstate is not NULL: PyEval_RestoreThread(gilstate)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
 
     cdef void ReleaseBooleanArrayElements(self, jbooleanArray array, jboolean *elems, jint mode):
@@ -952,34 +957,34 @@ cdef class JEnv(object):
     # Registering Native Methods
     cdef int RegisterNatives(self, jclass clazz, const JNINativeMethod *methods, jint nMethods) except -1:
         assert clazz is not NULL and methods is not NULL and nMethods > 0
-        if self.env[0].RegisterNatives(self.env, clazz, methods, nMethods) < 0: self.check_exc()
+        if self.env[0].RegisterNatives(self.env, clazz, methods, nMethods) < 0: self.__raise_exception()
         return 0
     cdef int UnregisterNatives(self, jclass clazz) except -1:
         assert clazz is not NULL
-        if self.env[0].UnregisterNatives(self.env, clazz) < 0: self.check_exc()
+        if self.env[0].UnregisterNatives(self.env, clazz) < 0: self.__raise_exception()
         return 0
 
     # Monitor Operations -  basically the 'synchronized' block from Java
     cdef int MonitorEnter(self, jobject obj) except -1:
-        if self.env[0].MonitorEnter(self.env, obj) < 0: self.check_exc()
+        if self.env[0].MonitorEnter(self.env, obj) < 0: self.__raise_exception()
         return 0
     cdef int MonitorExit(self, jobject obj) except -1:
-        if self.env[0].MonitorExit(self.env, obj) < 0: self.check_exc()
+        if self.env[0].MonitorExit(self.env, obj) < 0: self.__raise_exception()
         return 0
 
     # NIO Support
     IF JNI_VERSION >= JNI_VERSION_1_4:
-        cdef jobject NewDirectByteBuffer(self, void* address, jlong capacity):
+        cdef jobject NewDirectByteBuffer(self, void* address, jlong capacity) except NULL:
             cdef jobject out = self.env[0].NewDirectByteBuffer(self.env, address, capacity)
-            if out is NULL: self.check_exc()
+            if out is NULL: self.__raise_exception()
             return out
         cdef void* GetDirectBufferAddress(self, jobject buf) except NULL:
             cdef void* out = self.env[0].GetDirectBufferAddress(self.env, buf)
-            if out is NULL: self.check_exc()
+            if out is NULL: self.__raise_exception()
             return out
         cdef jlong GetDirectBufferCapacity(self, jobject buf) except -1:
             cdef jlong out = self.env[0].GetDirectBufferCapacity(self.env, buf)
-            if out < 0: self.check_exc()
+            if out < 0: self.__raise_exception()
             return out
 
     # Reflection Support
@@ -988,10 +993,10 @@ cdef class JEnv(object):
     cdef jobject ToReflectedMethod(self, jclass cls, jmethodID methodID, jboolean isStatic) except NULL:
         assert cls is not NULL and methodID is not NULL
         cdef jobject out = self.env[0].ToReflectedMethod(self.env, cls, methodID, isStatic)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jobject ToReflectedField(self, jclass cls, jfieldID fieldID, jboolean isStatic) except NULL:
         assert cls is not NULL and fieldID is not NULL
         cdef jobject out = self.env[0].ToReflectedField(self.env, cls, fieldID, isStatic)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out

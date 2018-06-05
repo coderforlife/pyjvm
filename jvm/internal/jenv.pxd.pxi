@@ -99,10 +99,10 @@ cdef class JEnv(object):
     #    return JVM.wrap(vm)?
 
     # Class Operations
-    cdef jobject DefineClass(self, unicode name, jobject loader, bytes buf)
+    cdef jobject DefineClass(self, unicode name, jobject loader, bytes buf) except NULL
     cdef inline jclass FindClass(self, unicode name) except NULL:
         cdef jclass clazz = self.env[0].FindClass(self.env, to_utf8j(name.replace(u'.', u'/')))
-        if clazz is NULL: self.check_exc()
+        if clazz is NULL: self.__raise_exception()
         return clazz
     cdef inline jclass GetSuperclass(self, jclass clazz) except? NULL:
         assert clazz is not NULL
@@ -125,8 +125,7 @@ cdef class JEnv(object):
     cdef bint ExceptionCheck(self)
 
     # Global and Local References
-    cdef inline jobject NewGlobalRef(self, jobject obj) except NULL:
-        assert obj != NULL
+    cdef inline jobject NewGlobalRef(self, jobject obj) except? NULL:
         cdef jobject out = self.env[0].NewGlobalRef(self.env, obj)
         if out is NULL: self.check_exc()
         return out
@@ -134,8 +133,7 @@ cdef class JEnv(object):
         assert globalRef is not NULL
         self.env[0].DeleteGlobalRef(self.env, globalRef)
         #self.check_exc() # This is usually in the finally clause, don't check for errors
-    cdef inline jobject NewLocalRef(self, jobject ref) except NULL:
-        assert ref is not NULL
+    cdef inline jobject NewLocalRef(self, jobject ref) except? NULL:
         cdef jobject out = self.env[0].NewLocalRef(self.env, ref)
         if out is NULL: self.check_exc()
         return out
@@ -149,7 +147,6 @@ cdef class JEnv(object):
 
     # Weak Global References
     cdef inline jweak NewWeakGlobalRef(self, jobject obj) except? NULL:
-        assert obj is not NULL
         cdef jweak out = self.env[0].NewWeakGlobalRef(self.env, obj)
         if out is NULL: self.check_exc()
         return out
@@ -159,11 +156,11 @@ cdef class JEnv(object):
         #self.check_exc() # This is usually in the finally clause, don't check for errors
 
     # Delete<X>Ref Wrapper
-    cdef inline int DeleteRef(self, jobject obj) except -1:
+    cdef inline void DeleteRef(self, jobject obj):
         """
         Deletes the reference to a Java Object regardless if it is a local, global, or weak-global reference.
         """
-        if obj is NULL: return 0
+        if obj is NULL: return
         cdef JNIEnv* env = self.env
         IF JNI_VERSION >= JNI_VERSION_1_6:
             # We can use GetObjectRefType
@@ -187,12 +184,12 @@ cdef class JEnv(object):
                     #self.check_exc() # This is usually in the finally clause, don't check for errors
 
     # Object Operations
-    cdef jobject AllocObject(self, jclass clazz)
+    cdef jobject AllocObject(self, jclass clazz) except NULL
     cdef jobject NewObject(self, jclass clazz, jmethodID methodID, const jvalue *args=*, bint withgil=*) except NULL
     cdef inline jclass GetObjectClass(self, jobject obj) except NULL:
         assert obj is not NULL
         cdef jclass clazz = self.env[0].GetObjectClass(self.env, obj)
-        if clazz is NULL: self.check_exc()
+        if clazz is NULL: self.__raise_exception()
         return clazz
     IF JNI_VERSION >= JNI_VERSION_1_6:
         cdef jobjectRefType GetObjectRefType(self, jobject obj) except <jobjectRefType>-1
@@ -285,7 +282,7 @@ cdef class JEnv(object):
     cdef object CallStaticDoubleMethod(self, jclass clazz, jmethodID method, const jvalue *args, bint withgil)
 
     # String Operations
-    cdef inline jstring NewString(self, unicode s):
+    cdef inline jstring NewString(self, unicode s) except? NULL:
         if s is None: return NULL
         cdef bytes b = PyUnicode_AsUTF16String(s)
         cdef jstring string = self.env[0].NewString(self.env, (<jchar*><char*>b)+1, <jsize>(len(b)//sizeof(jchar))-1)
@@ -294,7 +291,7 @@ cdef class JEnv(object):
     cdef jsize GetStringLength(self, jstring string) except -1
     cdef const jchar *GetStringChars(self, jstring string, jboolean *isCopy=*) except NULL
     cdef void ReleaseStringChars(self, jstring string, const jchar *chars)
-    cdef jstring NewStringUTF(self, unicode s) except NULL
+    cdef jstring NewStringUTF(self, unicode s) except? NULL
     cdef jsize GetStringUTFLength(self, jstring string) except -1
     cdef const char *GetStringUTFChars(self, jstring string, jboolean *isCopy=*) except NULL
     cdef void ReleaseStringUTFChars(self, jstring string, const char *utf)
@@ -307,12 +304,12 @@ cdef class JEnv(object):
     cdef inline jsize GetArrayLength(self, jarray array) except -1:
         assert array is not NULL
         cdef jsize out = self.env[0].GetArrayLength(self.env, array)
-        if out < 0: self.check_exc()
+        if out < 0: self.__raise_exception()
         return out
     cdef inline jobjectArray NewObjectArray(self, jsize length, jclass elementClass, jobject initialElement) except NULL:
         assert length >= 0 and elementClass is not NULL
         cdef jobjectArray out = self.env[0].NewObjectArray(self.env, length, elementClass, initialElement)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef inline jobject GetObjectArrayElement(self, jobjectArray array, jsize index) except? NULL:
         assert array is not NULL
@@ -389,7 +386,7 @@ cdef class JEnv(object):
 
     # NIO Support
     IF JNI_VERSION >= JNI_VERSION_1_4:
-        cdef jobject NewDirectByteBuffer(self, void* address, jlong capacity)
+        cdef jobject NewDirectByteBuffer(self, void* address, jlong capacity) except NULL
         cdef void* GetDirectBufferAddress(self, jobject buf) except NULL
         cdef jlong GetDirectBufferCapacity(self, jobject buf) except -1
 
@@ -397,12 +394,12 @@ cdef class JEnv(object):
     cdef inline jfieldID FromReflectedField(self, jobject field) except NULL:
         assert field is not NULL
         cdef jfieldID out = self.env[0].FromReflectedField(self.env, field)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef inline jmethodID FromReflectedMethod(self, jobject method) except NULL:
         assert method is not NULL
         cdef jmethodID out = self.env[0].FromReflectedMethod(self.env, method)
-        if out is NULL: self.check_exc()
+        if out is NULL: self.__raise_exception()
         return out
     cdef jobject ToReflectedMethod(self, jclass cls, jmethodID methodID, jboolean isStatic) except NULL
     cdef jobject ToReflectedField(self, jclass cls, jfieldID fieldID, jboolean isStatic) except NULL
