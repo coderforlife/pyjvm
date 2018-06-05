@@ -39,7 +39,7 @@ from .unicode cimport to_utf8j, unichr
 
 from .jni cimport jclass, jfieldID, jobject, jvalue, jint, JNIEnv, JNINativeMethod
 
-from .core cimport JClass, JMethod, JField, JEnv, jenv, ClassLoaderDef
+from .core cimport JClass, JMethod, JField, JEnv, jenv, ClassLoaderDef, unregister_natives
 from .core cimport Modifiers, PUBLIC, PRIVATE, PROTECTED, STATIC, FINAL, SUPER, NATIVE, ABSTRACT, SYNTHETIC
 from .core cimport py2boolean, py2byte, py2char, py2short, py2int, py2long, py2float, py2double
 from .objects cimport get_java_class
@@ -426,7 +426,7 @@ def synth_class(cls, methods, superclass=None, interfaces=()):
     data = b'\xca\xfe\xba\xbe\x00\x00' + u2((JNI_VERSION&0xFFFF) + 44) + constants.get_data() + data.getvalue()
     # DEBUG: with open('test.class', 'wb') as f: f.write(data)
     
-    # Load the class
+    ### Load the class ###
     cdef jobject class_loader = env.CallStaticObject(ClassLoaderDef.clazz, ClassLoaderDef.getSystemClassLoader)
     cdef jclass jcls = env.DefineClass(name, class_loader, data)
     cdef jvalue val
