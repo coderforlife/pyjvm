@@ -26,7 +26,7 @@ Internal functions:
     synth_class - creates a synthetic Java class
     
 TODO:
-    make system for better defining synthetic classes
+    handle default methods
 """
 
 include "version.pxi"
@@ -34,16 +34,16 @@ include "version.pxi"
 from libc.stdlib cimport malloc, free
 from libc.stdint cimport uint16_t, uint32_t, uint64_t, int32_t, int64_t, uintptr_t
 
-from .utils cimport VALUES
+from .utils cimport to_unicode, is_callable, VALUES
 from .unicode cimport to_utf8j, unichr
 
 from .jni cimport jclass, jfieldID, jobject, jvalue, jint, JNIEnv, JNINativeMethod
 
-from .core cimport JClass, JMethod, JField, JEnv, jenv, ClassLoaderDef, unregister_natives
+from .core cimport JObject, JClass, JMethod, JField, JEnv, jenv, ClassLoaderDef, unregister_natives
 from .core cimport Modifiers, PUBLIC, PRIVATE, PROTECTED, STATIC, FINAL, SUPER, NATIVE, ABSTRACT, SYNTHETIC
 from .core cimport py2boolean, py2byte, py2char, py2short, py2int, py2long, py2float, py2double
 from .objects cimport get_java_class
-from .convert cimport object2py, py2object
+from .convert cimport object2py, py2object, get_parameter_sig
 
 from io import BytesIO
 import struct, operator, ctypes
@@ -220,7 +220,8 @@ cdef class MethodInfo(object):
     cdef inline MethodInfo create(JMethod method):
         return MethodInfo(method.modifiers, method.name, method.sig(), method.exc_types)
 
-cdef inline int all_methods(classes, dict abstract, dict concrete) except -1: # [JClass], {(name,param_sig):MethodInfo}
+cdef inline int all_methods(list classes, dict abstract, dict concrete) except -1: # [JClass], {(name,param_sig):MethodInfo}
+    cdef JClass cls
     for cls in classes: all_methods_1(cls, abstract, concrete)
     return 0
 
@@ -245,43 +246,40 @@ cdef int all_methods_1(JClass cls, dict abstract, dict concrete) except -1:
         all_methods_1(cls.superclass, abstract, concrete)
     all_methods(cls.interfaces, abstract, concrete)
     return 0
+    
+cdef inline break_param_sig(unicode ps):
+    param_sigs = []
+    while len(ps) > 0:
+        if ps[0] == u'L': i = ps.index(u';', 1)+1
+        elif ps[0] == u'[':
+            for i in xrange(1, len(ps)):
+                if ps[i] != u'[': break
+            if ps[i] == u'L': i = ps.index(u';', i+1)+1
+        else: i = 1
+        param_sigs.append(ps[:i])
+        ps = ps[i:]
+    return param_sigs
+
 
 cdef dict java2ctypes = {
-    'L' : ctypes.c_void_p,
-    '[' : ctypes.c_void_p,
-    'V' : None,
-    'Z' : ctypes.c_bool,
-    'B' : ctypes.c_int8,
-    'C' : ctypes.c_uint16,
-    'S' : ctypes.c_int16,
-    'I' : ctypes.c_int32,
-    'I' : ctypes.c_int64,
-    'F' : ctypes.c_float,
-    'D' : ctypes.c_double,
+    u'L': ctypes.c_void_p, u'[': ctypes.c_void_p, u'V': None,
+    u'Z': ctypes.c_bool,   u'C': ctypes.c_uint16,
+    u'B': ctypes.c_int8,   u'S': ctypes.c_int16,  u'I': ctypes.c_int32, u'I': ctypes.c_int64,
+    u'F': ctypes.c_float,  u'D': ctypes.c_double,
 }
 cdef inline void* ptr(uintptr_t x): return <void*>x
-cdef dict selfs = { }
-cdef void* create_bridge(JEnv env, cls, method, unicode sig, is_init) except NULL:
+cdef dict selfs = { } # TODO: dealloc
+cdef void* create_bridge(JEnv env, cls, jfieldID self_fid, method, unicode sig, is_init) except NULL:
     # Parse the signature
     last_paren = sig.rindex(u')')
+    param_sigs = break_param_sig(sig[1:last_paren])
     return_sig = sig[last_paren+1:]
     cdef JClass return_cls = None
     if   return_sig[0] == u'L': return_cls = JClass.named(env, return_sig[1:-1])
     elif return_sig[0] == u'[': return_cls = JClass.named(env, return_sig)
-    param_sig = sig[1:last_paren]
-    param_sigs = []
-    while len(param_sig) > 0:
-        if param_sig[0] == u'L': i = sig.index(u';')+1
-        elif param_sig[0] == u'[':
-            for i in xrange(1, len(param_sig)):
-                if param_sig[i] != u'[': break
-            if param_sig[i] == u'L': i = sig.index(u';')+1
-        else: i = 1
-        param_sigs.append(param_sig[:i])
-        param_sig = param_sig[i:]
+    return_sig = return_sig[0]
         
     # Create the Python bridge function
-    cdef jfieldID self_fid = <jfieldID>ptr(cls.__pyjvm_self_fid__)
     def pyjvm_bridge(_env, _obj, *args):
         cdef JEnv env = JEnv.wrap(<JNIEnv*>ptr(_env))
         cdef jobject obj = <jobject>ptr(_obj)
@@ -293,28 +291,33 @@ cdef void* create_bridge(JEnv env, cls, method, unicode sig, is_init) except NUL
                 arg = object2py(env, <jobject>ptr(arg))
             elif sig[0] == 'C': arg = unichr(arg)
             new_args.append(arg)
+
         # Call the method
         if is_init:
-            self = cls.__new__(cls) # TODO: should be from the JavaClass
-            selfs[id(self)] = self
-            env.env[0].SetLongField(env.env, obj, self_fid, id(self))
+            self = cls.__new__(cls, JObject.wrap(env.NewGlobalRef(obj)))
+            self_id = id(self)
+            selfs[self_id] = self
+            env.env[0].SetLongField(env.env, obj, self_fid, self_id)
             env.check_exc()
         else:
             self = selfs[env.GetLongField(obj, self_fid)]
+        #try:
         retval = method(self, *new_args)
+        #except ex:
+        #    pass # TODO: implement exception handling
+
         # Convert the return value
-        if return_sig[0] == u'L' or return_sig[0] == u'[':
+        if return_sig == u'L' or return_sig == u'[':
             return <uintptr_t>py2object(env, retval, return_cls)
-        if return_sig == u'V': return None
         if return_sig == u'Z': return py2boolean(retval)
-        if return_sig == u'B': return py2byte(retval)
         if return_sig == u'C': return py2char(retval)
+        if return_sig == u'B': return py2byte(retval)
         if return_sig == u'S': return py2short(retval)
         if return_sig == u'I': return py2int(retval)
         if return_sig == u'J': return py2long(retval)
         if return_sig == u'F': return py2float(retval)
         if return_sig == u'D': return py2double(retval)
-    method.__pyjvm_bridge__ = pyjvm_bridge
+        return None #if return_sig == u'V':
     
     # Create the C function
     cfunctype = ctypes.CFUNCTYPE(java2ctypes[return_sig], ctypes.c_void_p, ctypes.c_void_p,
@@ -322,7 +325,7 @@ cdef void* create_bridge(JEnv env, cls, method, unicode sig, is_init) except NUL
     method.__pyjvm_cfunc__ = cfunctype(pyjvm_bridge)
     return <void*>ptr(ctypes.cast(method.__pyjvm_cfunc__, ctypes.c_void_p).value)
     
-def synth_class(cls, methods, superclass=None, interfaces=()):
+def synth_class(cls, methods, JClass superclass, list interfaces):
     """
     Creates a synthetic Java class that maps onto a Python class.
     
@@ -333,10 +336,9 @@ def synth_class(cls, methods, superclass=None, interfaces=()):
     that extend from Throwable. The method is the Python unbound method that is called when the
     function is called.
     
-    The Java class extends from the given superclass (default java.lang.Object) and implements the
-    given interfaces (default none). All of the methods must override methods in this superclasses
-    and interfaces. The class is appropiately marked as abstract if there are methods not
-    implemented.
+    The Java class extends from the given superclass and implements the given interfaces. All of
+    the methods must override methods in this superclasses and interfaces. The class is
+    appropiately marked as abstract if there are methods that are left not implemented.
     
     Additionally, constructors are created for every non-private constructor in the superclass.
     These constructors call the superclass constructor and then call a native method that forwards
@@ -347,20 +349,26 @@ def synth_class(cls, methods, superclass=None, interfaces=()):
     
     This returns the JavaClass representing the newly synthesized class.
     """
+    from .objects import JavaClass
     cdef JEnv env = jenv()
     
     # Check the superclass and interfaces
-    if superclass is None: superclass = get_java_class(u'java.lang.Object')
-    cdef JClass sup = superclass.__jclass__, intrfc
-    cdef list intrfcs = [iface.__jclass__ for iface in interfaces]
-    if sup.is_primitive() or sup.is_interface() or sup.is_final(): raise ValueError("superclass")
-    for intrfc in intrfcs:
-        if not intrfc.is_interface(): raise ValueError("interfaces")
+    cdef JClass iface
+    if superclass is None: superclass = JClass.named(env, u'java.lang.Object')
+    elif superclass.is_primitive() or superclass.is_interface() or superclass.is_final(): raise TypeError("superclass cannot be extended")
+    for iface in interfaces:
+        if not iface.is_interface(): raise TypeError("interfaces are not all interfaces")
 
-    # Check the name
+    # Get the name
     name = u'pyjvm.__synth__.'+cls.__name__
     while class_exists(env, name):
         name = u'pyjvm.__synth__.'+cls.__name__+'_'+random_string()
+    
+    # Get the __init__ and __dealloc__ methods
+    init = cls.__dict__.get('__init__', lambda self,*args:None)
+    prev_dealloc = cls.__dict__.get('__dealloc__', None)
+    dealloc = ((lambda self: unregister_natives(clazz)) if prev_dealloc is None else 
+               (lambda self: (prev_dealloc(self), unregister_natives(clazz)))) # extend the old dealloc
 
     # Setup variables
     cdef ConstantPool constants = ConstantPool()
@@ -370,29 +378,29 @@ def synth_class(cls, methods, superclass=None, interfaces=()):
 
     # Create the constructors
     cdef JMethod ctor
-    for ctor in sup.constructors:
+    for ctor in superclass.constructors:
         if not ctor.is_private():
             ctors += 1
-            meth_infos.extend(MethodInfo.ctor_w_init(constants, ctor, name, cls.__init__))
+            meth_infos.extend(MethodInfo.ctor_w_init(constants, ctor, name, init))
 
     # Create the methods
     cdef dict abstract = {}, concrete = {}
-    all_methods_1(sup, abstract, concrete)
-    all_methods(intrfcs, abstract, concrete)
+    all_methods_1(superclass, abstract, concrete)
+    all_methods(interfaces, abstract, concrete)
     have = set()
     for n,ps,rt,exc,um in methods:
         nt = (n, ps)
         sig = u'(%s)%s' % (ps, rt)
-        if nt in have: raise ValueError("duplicate name/paramaters for %s(%s)"%nt)
+        if nt in have: raise TypeError("duplicate name/paramaters for %s(%s)"%nt)
         have.add(nt)
         if nt in concrete:
             mi = concrete[nt]
             if (mi.mod & (FINAL|PRIVATE)) != 0 or sig != mi.sig or len(set(exc) - mi.exceptions) != 0:
-                raise ValueError("can only override methods that are already declared in the super-class or interfaces")
+                raise TypeError("can only override methods that are already declared in the superclass or interfaces")
         elif nt in abstract:
             mi = abstract.pop(nt)
-            if sig != mi.sig or len(set(exc) - mi.exceptions) != 0: raise ValueError("can only override methods that are already declared in the super-class or interfaces")
-        else: raise ValueError("can only override methods that are already declared in the super-class or interfaces")
+            if sig != mi.sig or len(set(exc) - mi.exceptions) != 0: raise TypeError("can only override methods that are already declared in the superclass or interfaces")
+        else: raise TypeError("can only override methods that are already declared in the superclass or interfaces")
         meth_infos.append(MethodInfo((mi.mod&(PUBLIC|PROTECTED))|NATIVE, n, sig, exc, um))
     
     ### Create the class file ###
@@ -402,8 +410,8 @@ def synth_class(cls, methods, superclass=None, interfaces=()):
     data.write(u2(SUPER|SYNTHETIC|(0 if len(abstract) == 0 else ABSTRACT)))
 
     # this and super classes and interfaces
-    data.write(u2(constants.cls_name(name)) + u2(constants.cls(sup)) + u2(len(interfaces)))
-    for intrfc in intrfcs: data.write(u2(constants.cls(intrfc)))
+    data.write(u2(constants.cls_name(name)) + u2(constants.cls(superclass)) + u2(len(interfaces)))
+    for iface in interfaces: data.write(u2(constants.cls(iface)))
 
     # Fields (always one for a way to refer to the Python self object)
     data.write(u2(1) + u2(PRIVATE|SYNTHETIC|FINAL) + u2(constants.utf8(u'__pyjvm_self$$')) +
@@ -426,29 +434,137 @@ def synth_class(cls, methods, superclass=None, interfaces=()):
     data = b'\xca\xfe\xba\xbe\x00\x00' + u2((JNI_VERSION&0xFFFF) + 44) + constants.get_data() + data.getvalue()
     # DEBUG: with open('test.class', 'wb') as f: f.write(data)
     
-    ### Load the class ###
+    ### Define the Java class ###
     cdef jobject class_loader = env.CallStaticObject(ClassLoaderDef.clazz, ClassLoaderDef.getSystemClassLoader)
-    cdef jclass jcls = env.DefineClass(name, class_loader, data)
+    cdef jclass clazz = env.DefineClass(name, class_loader, data)
     cdef jvalue val
-    val.l = jcls
+    val.l = clazz
     env.CallVoidMethod(class_loader, ClassLoaderDef.resolveClass, &val, True)
     
+    # Make the JavaClass
+    attr = cls.__dict__.copy()
+    attr['__java_class_name__'] = to_unicode(name)
+    attr['__init__'] = init
+    attr['__dealloc__'] = dealloc
+    slots = attr.get('__slots__')
+    if slots is not None:
+        if isinstance(slots, str): slots = [slots]
+        for slots_var in slots: attr.pop(slots_var)
+    attr.pop('__dict__', None)
+    attr.pop('__weakref__', None)
+    bases = cls.__bases__ if len(cls.__bases__) != 1 or cls.__bases__[0] != object else ()
+    jcls = JavaClass.__new__(JavaClass, cls.__name__, bases, attr)
+    
     # Link the Java methods to Python
-    cls.__pyjvm_self_fid__ = <uintptr_t>env.GetFieldID(jcls, u'__pyjvm_self$$', u'J')
+    cdef jfieldID self_fid = env.GetFieldID(clazz, u'__pyjvm_self$$', u'J')
     cdef jint n_nat_meths = len(meth_infos) - ctors
+    cdef list names = [to_utf8j(mi.name) for mi in meth_infos if (mi.mod&NATIVE) != 0] # we need to cache these so we can get the C-temporaries
+    cdef list sigs  = [to_utf8j(mi.sig)  for mi in meth_infos if (mi.mod&NATIVE) != 0]
     cdef JNINativeMethod* nat_meths = <JNINativeMethod*>malloc(n_nat_meths*sizeof(JNINativeMethod))
-    cdef list temps = []
     try:
         for mi in meth_infos:
             if (mi.mod&NATIVE) == 0: continue
-            temps.append(to_utf8j(mi.name)); nat_meths[i].name = temps[-1]
-            temps.append(to_utf8j(mi.sig));  nat_meths[i].signature = temps[-1]
-            nat_meths[i].fnPtr = create_bridge(env, cls, mi.pymeth, mi.sig, (mi.mod&PRIVATE)==PRIVATE)
+            nat_meths[i].name = names[i]
+            nat_meths[i].signature = sigs[i]
+            nat_meths[i].fnPtr = create_bridge(env, jcls, self_fid, mi.pymeth, mi.sig, (mi.mod&PRIVATE)==PRIVATE)
             i += 1
-        env.RegisterNatives(jcls, nat_meths, n_nat_meths)
+        env.RegisterNatives(clazz, nat_meths, n_nat_meths)
     finally: free(nat_meths)
-    # TODO: should be put onto new JavaClass class
-    cls.__dealloc__ = lambda self : unregister_natives(jcls)
 
-    # Load the JavaClass
-    return get_java_class(name)
+    # Return the new JavaClass
+    return jcls
+
+########## Decorators for creating synthetic classes ##########
+def conv_types(typ, *typs):
+    if len(typs) == 0:
+        # single argument - either single type or several types
+        #if is_multi_in_one: TODO
+        #    ...
+        return [get_parameter_sig(typ)]
+        
+    # multiple arguments - each must be its own type
+    return [get_parameter_sig(typ)] + [get_parameter_sig(t) for t in typs]
+def synth_override(name=None):
+    """
+    Marks a method as overriding a Java method (including interface methods, abstract methods, and
+    concrete methods). By default the name of overridden method will be the same as the method that
+    this is applied to. However, since Java can have multiple methods with the same name but Python
+    cannot, this is not always possible. You can provide the name of the real method when using
+    @Override(name).
+    """
+    def jvm_override(m):
+        if not hasattr(m, '__pyjvm_meth__'): m.__pyjvm_meth__ = {}
+        if 'override' in m.__pyjvm_meth__: raise TypeError('method has already been marked as override')
+        m.__pyjvm_meth__['override'] = m.__name__ if name is None else name
+        return m
+    # Check if this was used like @Override instead of @Override()
+    if is_callable(name):
+        name, m = None, name
+        return jvm_override(m)
+    return jvm_override
+def synth_param(typ, *typs):
+    """
+    Adds a parameter type for the method. The argument(s) is the type(s) of the parameter(s).
+    May be applied multiple times or multiple arguments may be given at a time. The order of
+    the arguments or the application is critical to properly match the Java method.
+    """
+    def jvm_param(m):
+        if not hasattr(m, '__pyjvm_meth__'): m.__pyjvm_meth__ = {}
+        m.__pyjvm_meth__['params'] = u''.join(conv_types(typ, typs)) + m.__pyjvm_meth__.get('params', u'')
+        return m
+    return jvm_param
+def synth_return(typ):
+    """
+    Adds a return type for the method. The argument is the type of the return. May only be applied
+    once. If not applied the method is assumed to have the return type "void".
+    """
+    def jvm_return(m):
+        if not hasattr(m, '__pyjvm_meth__'): m.__pyjvm_meth__ = {}
+        if 'return' in m.__pyjvm_meth__: raise TypeError('method already has a return type')
+        m.__pyjvm_meth__['return'] = get_parameter_sig(typ)
+        return m
+    return jvm_return
+def synth_throws(typ, *typs):
+    """
+    Adds a throws clause to the method. The argument(s) is the type(s) of exception(s) to be
+    thrown. May be applied multiple times or multiple arguments may be given at a time. Order is
+    unimportant.
+    """
+    def jvm_throws(m):
+        if not hasattr(m, '__pyjvm_meth__'): m.__pyjvm_meth__ = {}
+        cdef JEnv env = jenv()
+        throwable = JClass.named(env, u'java.lang.Throwable')
+        ts = conv_types(typ, typs)
+        for t in ts:
+            if t[0] != u'L' or t[-1] != u';' or not JClass.named(env, t[1:-1]).is_sub(env, throwable):
+                raise TypeError('can only throw subclasses of java.lang.Throwable')
+        m.__pyjvm_meth__.setdefault('throws', set()).update(ts)
+        return m
+    return jvm_throws
+def synth_extends(jc, *jcs):
+    """
+    Extend/implement one or more Java classes/interfaces. If extending a class it must be listed
+    first (if the first thing is not a class it is assumed to be extending java.lang.Object). The
+    order of the interfaces after that is unimportant.
+    """
+    def jvm_extends(cls):
+        # Get superclass and interfaces
+        cdef JClass superclass = jc.__jclass__
+        cdef list interfaces = [iface.__jclass__ for iface in jcs]
+        if (<JClass>jc.__jclass__).is_interface():
+            interfaces.insert(0, superclass)
+            superclass = None
+
+        # Get the methods
+        methods = []
+        for m in VALUES(cls.__dict__):
+            if hasattr(m, '__pyjvm_meth__'):
+                if not is_callable(m): raise TypeError('attempting to extend a non-method')
+                info = m.__pyjvm_meth__
+                if 'override' not in info: raise TypeError('method %s did not have @jvm.override specified')
+                methods.append((info['override'], info.get('params', u''), info.get('return', 'V'),
+                                info.get('throws', ()), m))
+
+        # Create the synthetic class
+        return synth_class(cls, methods, superclass, interfaces)
+    return jvm_extends
