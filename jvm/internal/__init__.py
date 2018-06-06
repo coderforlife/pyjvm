@@ -32,14 +32,15 @@ from .synth import *
 
 # The set of functions that should be publicly accessible
 jvm_publicfuncs = {
-    'get_java_class':get_java_class,'template':template,
-    'synchronized':synchronized,'unbox':unbox,'register_converter':register_converter,
-    'JavaClass':JavaClass,'JavaMethods':JavaMethods,'JavaMethod':JavaMethod,'JavaConstructor':JavaConstructor
+    'get_java_class':get_java_class,'template':template,'synchronized':synchronized,'unbox':unbox,'register_converter':register_converter,
+    'JavaClass':JavaClass,'JavaMethods':JavaMethods,'JavaMethod':JavaMethod,'JavaConstructor':JavaConstructor,
+    'override':synth_override,'param':synth_param,'return':synth_return,'throws':synth_throws,'extends':synth_extends,'implements':synth_extends,
 }
 publicfuncs = {
-    'get_java_class':get_java_class,'template':template,
-    'synchronized':synchronized,'unbox':unbox,'register_converter':register_converter,
+    'get_java_class':get_java_class,'template':template,'synchronized':synchronized,'unbox':unbox,'register_converter':register_converter,
     'JavaClass':JavaClass,'JavaMethods':JavaMethods,'JavaMethod':JavaMethod,'JavaConstructor':JavaConstructor,
+    'override':synth_override,'param':synth_param,'return':synth_return,'throws':synth_throws,'extends':synth_extends,'implements':synth_extends,
+
     'boolean_array':boolean_array,'char_array':char_array,'object_array':object_array,
     'byte_array':byte_array,'short_array':short_array,'int_array':int_array,'long_array':long_array,
     'float_array':float_array,'double_array':double_array,

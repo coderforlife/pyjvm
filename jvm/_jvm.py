@@ -31,9 +31,11 @@ import sys
 from ._util import is_py2
 if is_py2:
     def _keys(d): return d.viewkeys()
+    def _items(d): return d.viewitems()
 else:
     unicode = str
     def _keys(d): return d.keys()
+    def _items(d): return d.items()
 
 __jvm = None
 __class_paths = []
@@ -157,7 +159,7 @@ def __start_core(prefer, opts):
     # a _start_if_needed and then are replaced.
     sys.modules[JavaImporter._mod_super] = JavaPackage('')
     import jvm.internal, jvm
-    for f in jvm.internal.jvm_publicfuncs: setattr(jvm, f, getattr(jvm.internal, f))
+    for n,f in _items(jvm.internal.jvm_publicfuncs): setattr(jvm, n, f)
     
 def _start_if_needed():
     """Starts the JVM only if not already started."""
