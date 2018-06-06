@@ -19,10 +19,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 from __future__ import absolute_import
 
 from .jni cimport jclass, jobject, jvalue, jint
-from .core cimport JClass, JObject, jenv, SystemDef
+from .core cimport JClass, JObject, JEnv, jenv, SystemDef
 
 cpdef get_java_class(unicode classname)
-cdef create_java_object(jobject obj)
+cpdef create_java_object(JEnv env, JObject obj)
 cdef inline JClass get_object_class(obj):
     """Gets the JClass of an Object"""
     return type(obj).__jclass__

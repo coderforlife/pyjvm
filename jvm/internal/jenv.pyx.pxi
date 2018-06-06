@@ -91,26 +91,14 @@ cdef class JEnv(object):
             finally: env[0].ReleaseStringCritical(env, string, chars)
         finally:
             if delete: self.DeleteRef(string)
-    cdef object __create_java_object(self, jobject obj):
-        # This is the same as objects.create_java_object but we can't cimport functions from that
-        # module here so we reproduce it. We can import Python classes/functions though.
-        from .objects import get_java_class
-        cdef JClass clazz = JClass.get(self, self.GetObjectClass(obj))
-        cdef jfieldID fid
-        cls = get_java_class(clazz.name)
-        if clazz.is_member() and not clazz.is_static() and clazz.declaring_class is not None:
-            try:
-                fid = self.GetFieldID(clazz.clazz, u'this$0', clazz.declaring_class.sig())
-                cls = cls._bind_inner_class_to(self.GetObjectField(obj, fid))
-            except Exception as ex: pass
-        return cls.__new__(cls, JObject.create(self, obj))
     cdef object __object2py(self, jobject obj):
         # This is the same as convert.object2py but we can't cimport functions from that module
         # here so we reproduce it.
         if obj is NULL: return None # null -> None
         cdef JClass clazz = JClass.get(self, self.GetObjectClass(obj))
         if clazz.name == u'java.lang.String': return self.pystr(<jstring>obj)
-        return self.__create_java_object(obj)
+        from .objects import create_java_object
+        return create_java_object(self, JObject.create(self, obj))
         
     # Checking exceptions
     cdef int __raise_exception(self) except -1:
@@ -123,7 +111,8 @@ cdef class JEnv(object):
         cdef jthrowable t = self.env[0].ExceptionOccurred(self.env)
         #self.env[0].ExceptionDescribe(self.env)
         self.env[0].ExceptionClear(self.env)
-        raise self.__create_java_object(t)
+        from .objects import create_java_object
+        raise create_java_object(self, JObject.create(self, t))
 
     # Miscellaneous Operations
     cdef jint GetVersion(self) except -1:
@@ -207,12 +196,7 @@ cdef class JEnv(object):
     #cdef inline bint IsSameObject(self, jobject ref1, jobject ref2) except -1:
 
     # Accessing Fields of Objects
-    cdef jfieldID GetFieldID(self, jclass clazz, unicode name, unicode sig) except NULL:
-        assert clazz is not NULL
-        cdef jfieldID out = self.env[0].GetFieldID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
-        if out is NULL: self.__raise_exception()
-        return out
-
+    #cdef inline jfieldID GetFieldID(self, jclass clazz, unicode name, unicode sig) except NULL:
     cdef object GetObjectField(self, jobject obj, jfieldID fieldID):
         assert obj is not NULL and fieldID is not NULL
         cdef jobject out = self.env[0].GetObjectField(self.env, obj, fieldID)
@@ -308,12 +292,7 @@ cdef class JEnv(object):
         return 0
 
     # Calling Instance Methods
-    cdef jmethodID GetMethodID(self, jclass clazz, unicode name, unicode sig) except NULL:
-        assert clazz is not NULL
-        cdef jmethodID out = self.env[0].GetMethodID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
-        if out is NULL: self.__raise_exception()
-        return out
-
+    #cdef inline jmethodID GetMethodID(self, jclass clazz, unicode name, unicode sig) except NULL:
     cdef object CallObjectMethod(self, jobject obj, jmethodID method, const jvalue *args, bint withgil):
         assert obj is not NULL and method is not NULL
         cdef PyThreadState* gilstate = NULL if withgil else PyEval_SaveThread()
@@ -457,12 +436,7 @@ cdef class JEnv(object):
         return out
 
     # Accessing Static Fields
-    cdef jfieldID GetStaticFieldID(self, jclass clazz, unicode name, unicode sig) except NULL:
-        assert clazz is not NULL
-        cdef jfieldID out = self.env[0].GetStaticFieldID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
-        if out is NULL: self.__raise_exception()
-        return out
-
+    #cdef inline jfieldID GetStaticFieldID(self, jclass clazz, unicode name, unicode sig) except NULL:
     cdef object GetStaticObjectField(self, jclass clazz, jfieldID fieldID):
         assert clazz is not NULL and fieldID is not NULL
         cdef jobject out = self.env[0].GetStaticObjectField(self.env, clazz, fieldID)
@@ -558,11 +532,7 @@ cdef class JEnv(object):
         return 0
 
     # Calling Static Methods
-    cdef jmethodID GetStaticMethodID(self, jclass clazz, unicode name, unicode sig) except NULL:
-        assert clazz is not NULL
-        cdef jmethodID out = self.env[0].GetStaticMethodID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
-        if out is NULL: self.__raise_exception()
-        return out
+    #cdef inline jmethodID GetStaticMethodID(self, jclass clazz, unicode name, unicode sig) except NULL:
     cdef object CallStaticObjectMethod(self, jclass clazz, jmethodID method, const jvalue *args, bint withgil):
         assert clazz is not NULL and method is not NULL
         cdef PyThreadState* gilstate = NULL if withgil else PyEval_SaveThread()

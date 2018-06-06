@@ -101,7 +101,7 @@ cdef object object2py(JEnv env, jobject obj):
     if obj is NULL: return None # null -> None
     cdef JClass clazz = JClass.get(env, env.GetObjectClass(obj))
     if clazz.name == u'java.lang.String': return env.pystr(<jstring>obj)
-    return create_java_object(obj)
+    return create_java_object(env, JObject.create(env, obj))
 
 
 ########## Python to Java General Conversion Classes/Functions ##########

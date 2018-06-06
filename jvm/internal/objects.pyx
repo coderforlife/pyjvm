@@ -35,10 +35,11 @@ Public classes:
     JavaConstructor   - wrapper for a single Java contructor for a class
 
 Internal functions:
-    create_java_object - creates a Python object from a jobject
+    create_java_object - creates a Python object from a JObject
     get_object_class   - gets the JClass from a Python object
     get_class          - gets the jclass from a JavaClass
     get_object         - gets the jobject from a Python object
+    java_id            - gets the identity of a Java object
     
 TODO:
     inner classes automatically know the outer class instance and incorporate it into the constructor
@@ -69,20 +70,42 @@ cpdef get_java_class(unicode classname):
     """Gets the unique JavaClass for a given class name"""
     if classname in classes: return classes[classname]
     return JavaClass.__new__(JavaClass, classname, (), {'__java_class_name__':classname})
-cdef create_java_object(jobject obj):
-    """Creates a Java Object wrapper around the given object. The object is deleted."""
-    # NOTE: if this function is updated, JEnv.__create_java_object needs to be updated as well
-    cdef JEnv env = jenv()
-    cdef JClass clazz = JClass.get(env, env.GetObjectClass(obj))
-    cdef jfieldID fid
-    cls = get_java_class(clazz.name)
-    if clazz.is_member() and not clazz.is_static() and clazz.declaring_class is not None:
-        try:
-            fid = env.GetFieldID(clazz.clazz, u'this$0', clazz.declaring_class.sig())
-            cls = cls._bind_inner_class_to(env.GetObjectField(obj, fid))
-        except Exception as ex: pass
-    return cls.__new__(cls, JObject.create(env, obj))
 
+cdef dict java_objects = None # TODO: would like this to contain weak references but that causes problems
+cpdef create_java_object(JEnv env, JObject _obj):
+    """Creates a Java Object wrapper around the given object. The object is deleted."""
+    cdef jobject obj = _obj.obj
+    cdef JClass clazz = JClass.get(env, env.GetObjectClass(obj))
+    
+    # Check if this object has a self-id and is already created
+    # TODO: could use a is_synthetic check to possibly make this faster...
+    cdef jfieldID self_fid = env.GetFieldID_(clazz.clazz, u'__pyjvm_self$$', u'J'), fid
+    if self_fid is not NULL:
+        self_id = env.GetLongField(obj, self_fid)
+        if self_id != 0: return java_objects[self_id]
+    
+    # Get the Java class
+    cls = get_java_class(clazz.name)
+    
+    # Check if this is an inner class
+    if clazz.is_member() and not clazz.is_static() and clazz.declaring_class is not None:
+        fid = env.GetFieldID_(clazz.clazz, u'this$0', clazz.declaring_class.sig())
+        if fid is not NULL: cls = cls._bind_inner_class_to(env.GetObjectField(obj, fid))
+    
+    # Create the Python wrapper
+    py_obj = cls.__new__(cls, _obj)
+    if self_fid is not NULL:
+        # Save the id of this class so that in the future it always loads this instance
+        self_id = id(py_obj)
+        java_objects[self_id] = py_obj
+        env.env[0].SetLongField(env.env, obj, self_fid, self_id)
+        env.check_exc()
+    return py_obj
+    
+cdef inline new_java_object(JEnv env, jclass clazz, JMethod m, jvalue* jargs, bint withgil):
+    try: return create_java_object(env, JObject.create(env, env.NewObject(clazz, m.id, jargs, withgil)))
+    finally: free_method_args(env, m, jargs)
+    
 def template(class_name, *bases):
     """Makes the decorated class a Java Class template with the given class name."""
     # Mostly inspired from six.add_metaclass
@@ -197,8 +220,7 @@ class JavaClass(type):
         cdef JEnv env = jenv()
         cdef jvalue* jargs
         cdef JMethod m = conv_method_args(env, clazz.constructors, args, &jargs)
-        try: return create_java_object(env.NewObject(clazz.clazz, m.id, jargs, withgil))
-        finally: free_method_args(env, m, jargs)
+        return new_java_object(env, clazz.clazz, m, jargs, withgil)
     def __getitem__(self, ind):
         """
         Several operations go through the class[x] operator, depending on the type of `x`
@@ -274,7 +296,7 @@ class JavaClass(type):
             if clazz.is_static(): return u"<Java nested %s '%s'>"%x
             if not hasattr(self, '__self__'): return u"<Java inner %s '%s'>"%x
             return u"<Java inner %s '%s' bound to instance of '%s' at 0x%08x>"%(x+
-                    (get_object_class(self.__self__).name, get_identity(self.__self__)))
+                    (get_object_class(self.__self__).name, java_id(get_object(self.__self__))))
         return u"<Java %s '%s'>"%x
     def _bind_inner_class_to(self, obj):
         cdef JClass clazz = self.__jclass__
@@ -340,7 +362,7 @@ cdef class JavaMethods(object):
         def __get__(self): return tuple((<JMethod>m).sig() for m in self.methods)
     def __repr__(self):
         cdef unicode cname = get_object_class(self.__self__).name, name = self.__name__
-        return u"<Java methods %s.%s of instance at 0x%08x>" % (cname, name, get_identity(self.__self__))
+        return u"<Java methods %s.%s of instance at 0x%08x>" % (cname, name, java_id(get_object(self.__self__)))
 cdef class JavaStaticMethods(JavaMethods):
     """
     Like JavaMethods but for a group of static methods. `__self__` is a JavaClass instead of an
@@ -384,7 +406,7 @@ cdef class JavaMethod(object):
     def __repr__(self):
         cdef JClass clazz = get_object_class(self.__self__)
         cdef unicode cname = clazz.name, name = self.method.name, psig = self.method.param_sig()
-        return u"<Java method %s.%s(%s) of instance at 0x%08x>" % (cname, name, psig, get_identity(self.__self__))
+        return u"<Java method %s.%s(%s) of instance at 0x%08x>" % (cname, name, psig, java_id(get_object(self.__self__)))
 cdef class JavaStaticMethod(JavaMethod):
     """A single Java static method."""
     # __self__ is a JavaClass
@@ -412,8 +434,7 @@ cdef class JavaConstructor(object):
         cdef JEnv env = jenv()
         if self.__self__ is not None: args = (self.__self__,) + tuple(args)
         cdef jvalue* jargs = conv_method_args_single(env, self.method, args)
-        try: return create_java_object(env.NewObject(get_class(self.im_class), self.method.id, jargs, withgil))
-        finally: free_method_args(env, self.method, jargs)
+        return new_java_object(env, get_class(self.im_class), self.method, jargs, withgil)
     property __name__:
         def __get__(self): return (<JClass>self.im_class.__jclass__).simple_name
     property signature:
@@ -473,7 +494,9 @@ def unbox(o):
     else: return o
 
 cdef int init_objects(JEnv env) except -1:
-    global classes; classes = dict()
+    global classes, java_objects
+    classes = dict()
+    java_objects = dict()
 
     ### Core Classes and Interfaces ###
     @template(u'java.lang.Object')
@@ -678,7 +701,7 @@ cdef int init_objects(JEnv env) except -1:
         ELSE:
             def __str__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.toString, NULL, True)
         def __repr__(self):
-            return u"<Java instance of '%s' at 0x%08x>" % (get_object_class(self).name, get_identity(self))
+            return u"<Java instance of '%s' at 0x%08x>" % (get_object_class(self).name, java_id(get_object(self)))
 
     @template(u'java.lang.AutoCloseable')
     class AutoCloseable(object):
@@ -768,7 +791,7 @@ cdef int init_objects(JEnv env) except -1:
     return 0
 
 cdef int dealloc_objects(JEnv env) except -1:
-    global classes; classes = None; return 0
+    global classes, java_objects; classes = java_objects = None; return 0
     # Note: ABCMeta uses a weak reference set for subclass registrations, no need to deregister
 
 jvm_add_init_hook(init_objects, 2)

@@ -76,7 +76,6 @@ cdef class JEnv(object):
     
     # Basic Conversion
     cdef unicode pystr(self, jstring string, delete=*)
-    cdef object __create_java_object(self, jobject obj)
     cdef object __object2py(self, jobject obj)
     
     # Checking exceptions
@@ -204,7 +203,15 @@ cdef class JEnv(object):
         return out
 
     # Accessing Fields of Objects
-    cdef jfieldID GetFieldID(self, jclass clazz, unicode name, unicode sig) except NULL
+    cdef inline jfieldID GetFieldID(self, jclass clazz, unicode name, unicode sig) except NULL:
+        assert clazz is not NULL and name is not None and sig is not None
+        cdef jfieldID out = self.env[0].GetFieldID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
+        if out is NULL: self.__raise_exception()
+        return out
+    cdef inline jfieldID GetFieldID_(self, jclass clazz, unicode name, unicode sig):
+        cdef jfieldID out = self.env[0].GetFieldID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
+        if out is NULL: self.env[0].ExceptionClear(self.env)
+        return out
     cdef object GetObjectField(self, jobject obj, jfieldID fieldID)
     cdef object GetBooleanField(self, jobject obj, jfieldID fieldID)
     cdef object GetByteField(self, jobject obj, jfieldID fieldID)
@@ -225,7 +232,11 @@ cdef class JEnv(object):
     cdef int SetDoubleField(self, jobject obj, JField field, object value) except -1
 
     # Calling Instance Methods
-    cdef jmethodID GetMethodID(self, jclass clazz, unicode name, unicode sig) except NULL
+    cdef inline jmethodID GetMethodID(self, jclass clazz, unicode name, unicode sig) except NULL:
+        assert clazz is not NULL and name is not None and sig is not None
+        cdef jmethodID out = self.env[0].GetMethodID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
+        if out is NULL: self.__raise_exception()
+        return out
     cdef object CallObjectMethod(self, jobject obj, jmethodID method, const jvalue *args, bint withgil)
     cdef object CallVoidMethod(self, jobject obj, jmethodID method, const jvalue *args, bint withgil)
     cdef object CallBooleanMethod(self, jobject obj, jmethodID method, const jvalue *args, bint withgil)
@@ -248,7 +259,11 @@ cdef class JEnv(object):
     cdef object CallNonvirtualDoubleMethod(self, jobject obj, jclass clazz, jmethodID method, const jvalue *args, bint withgil)
 
     # Accessing Static Fields
-    cdef jfieldID GetStaticFieldID(self, jclass clazz, unicode name, unicode sig) except NULL
+    cdef inline jfieldID GetStaticFieldID(self, jclass clazz, unicode name, unicode sig) except NULL:
+        assert clazz is not NULL and name is not None and sig is not None
+        cdef jfieldID out = self.env[0].GetStaticFieldID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
+        if out is NULL: self.__raise_exception()
+        return out
     cdef object GetStaticObjectField(self, jclass clazz, jfieldID fieldID)
     cdef object GetStaticBooleanField(self, jclass clazz, jfieldID fieldID)
     cdef object GetStaticByteField(self, jclass clazz, jfieldID fieldID)
@@ -269,7 +284,11 @@ cdef class JEnv(object):
     cdef int SetStaticDoubleField(self, jclass clazz, JField field, object value) except -1
 
     # Calling Static Methods
-    cdef jmethodID GetStaticMethodID(self, jclass clazz, unicode name, unicode sig) except NULL
+    cdef inline jmethodID GetStaticMethodID(self, jclass clazz, unicode name, unicode sig) except NULL:
+        assert clazz is not NULL and name is not None and sig is not None
+        cdef jmethodID out = self.env[0].GetStaticMethodID(self.env, clazz, to_utf8j(name), to_utf8j(sig))
+        if out is NULL: self.__raise_exception()
+        return out
     cdef object CallStaticObjectMethod(self, jclass clazz, jmethodID method, const jvalue *args, bint withgil)
     cdef object CallStaticVoidMethod(self, jclass clazz, jmethodID method, const jvalue *args, bint withgil)
     cdef object CallStaticBooleanMethod(self, jclass clazz, jmethodID method, const jvalue *args, bint withgil)

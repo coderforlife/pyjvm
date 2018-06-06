@@ -42,7 +42,7 @@ from .jni cimport jclass, jfieldID, jobject, jvalue, jint, JNIEnv, JNINativeMeth
 from .core cimport JObject, JClass, JMethod, JField, JEnv, jenv, ClassLoaderDef, unregister_natives
 from .core cimport Modifiers, PUBLIC, PRIVATE, PROTECTED, STATIC, FINAL, SUPER, NATIVE, ABSTRACT, SYNTHETIC
 from .core cimport py2boolean, py2byte, py2char, py2short, py2int, py2long, py2float, py2double
-from .objects cimport get_java_class
+from .objects cimport create_java_object
 from .convert cimport object2py, py2object, get_parameter_sig
 
 from io import BytesIO
@@ -260,16 +260,16 @@ cdef inline break_param_sig(unicode ps):
         ps = ps[i:]
     return param_sigs
 
-
 cdef dict java2ctypes = {
     u'L': ctypes.c_void_p, u'[': ctypes.c_void_p, u'V': None,
     u'Z': ctypes.c_bool,   u'C': ctypes.c_uint16,
     u'B': ctypes.c_int8,   u'S': ctypes.c_int16,  u'I': ctypes.c_int32, u'I': ctypes.c_int64,
     u'F': ctypes.c_float,  u'D': ctypes.c_double,
 }
+
 cdef inline void* ptr(uintptr_t x): return <void*>x
-cdef dict selfs = { } # TODO: dealloc
-cdef void* create_bridge(JEnv env, cls, jfieldID self_fid, method, unicode sig, is_init) except NULL:
+
+cdef void* create_bridge(JEnv env, method, unicode sig) except NULL:
     # Parse the signature
     last_paren = sig.rindex(u')')
     param_sigs = break_param_sig(sig[1:last_paren])
@@ -283,41 +283,32 @@ cdef void* create_bridge(JEnv env, cls, jfieldID self_fid, method, unicode sig, 
     def pyjvm_bridge(_env, _obj, *args):
         cdef JEnv env = JEnv.wrap(<JNIEnv*>ptr(_env))
         cdef jobject obj = <jobject>ptr(_obj)
-        # Convert the arguments
-        new_args = []
-        for sig,arg in zip(param_sigs, args):
-            arg = arg.value
-            if sig[0] == 'L' or sig[0] == '[' and arg is not None:
-                arg = object2py(env, <jobject>ptr(arg))
-            elif sig[0] == 'C': arg = unichr(arg)
-            new_args.append(arg)
+        try:
+            # Convert the arguments
+            new_args = []
+            for sig,arg in zip(param_sigs, args):
+                arg = arg.value
+                if sig[0] == 'L' or sig[0] == '[' and arg is not None:
+                    arg = object2py(env, <jobject>ptr(arg))
+                elif sig[0] == 'C': arg = unichr(arg)
+                new_args.append(arg)
 
-        # Call the method
-        if is_init:
-            self = cls.__new__(cls, JObject.wrap(env.NewGlobalRef(obj)))
-            self_id = id(self)
-            selfs[self_id] = self
-            env.env[0].SetLongField(env.env, obj, self_fid, self_id)
-            env.check_exc()
-        else:
-            self = selfs[env.GetLongField(obj, self_fid)]
-        #try:
-        retval = method(self, *new_args)
-        #except ex:
-        #    pass # TODO: implement exception handling
+            # Call the method
+            retval = method(create_java_object(env, JObject.create(env, obj)), *new_args)
 
-        # Convert the return value
-        if return_sig == u'L' or return_sig == u'[':
-            return <uintptr_t>py2object(env, retval, return_cls)
-        if return_sig == u'Z': return py2boolean(retval)
-        if return_sig == u'C': return py2char(retval)
-        if return_sig == u'B': return py2byte(retval)
-        if return_sig == u'S': return py2short(retval)
-        if return_sig == u'I': return py2int(retval)
-        if return_sig == u'J': return py2long(retval)
-        if return_sig == u'F': return py2float(retval)
-        if return_sig == u'D': return py2double(retval)
-        return None #if return_sig == u'V':
+            # Convert the return value
+            if return_sig == u'L' or return_sig == u'[':
+                return <uintptr_t>py2object(env, retval, return_cls)
+            if return_sig == u'Z': return py2boolean(retval)
+            if return_sig == u'C': return py2char(retval)
+            if return_sig == u'B': return py2byte(retval)
+            if return_sig == u'S': return py2short(retval)
+            if return_sig == u'I': return py2int(retval)
+            if return_sig == u'J': return py2long(retval)
+            if return_sig == u'F': return py2float(retval)
+            if return_sig == u'D': return py2double(retval)
+            return None #if return_sig == u'V':
+        finally: pass # TODO: implement exception handling using env.Throw or env.ThrowNew
     
     # Create the C function
     cfunctype = ctypes.CFUNCTYPE(java2ctypes[return_sig], ctypes.c_void_p, ctypes.c_void_p,
@@ -360,9 +351,9 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
         if not iface.is_interface(): raise TypeError("interfaces are not all interfaces")
 
     # Get the name
-    name = u'pyjvm.__synth__.'+cls.__name__
+    cdef unicode name = u'pyjvm.__synth__.'+to_unicode(cls.__name__)
     while class_exists(env, name):
-        name = u'pyjvm.__synth__.'+cls.__name__+'_'+random_string()
+        name = u'pyjvm.__synth__.'+to_unicode(cls.__name__)+'_'+random_string()
     
     # Get the __init__ and __dealloc__ methods
     init = cls.__dict__.get('__init__', lambda self,*args:None)
@@ -443,7 +434,7 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
     
     # Make the JavaClass
     attr = cls.__dict__.copy()
-    attr['__java_class_name__'] = to_unicode(name)
+    attr['__java_class_name__'] = name
     attr['__init__'] = init
     attr['__dealloc__'] = dealloc
     slots = attr.get('__slots__')
@@ -453,10 +444,9 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
     attr.pop('__dict__', None)
     attr.pop('__weakref__', None)
     bases = cls.__bases__ if len(cls.__bases__) != 1 or cls.__bases__[0] != object else ()
-    jcls = JavaClass.__new__(JavaClass, cls.__name__, bases, attr)
+    jcls = JavaClass.__new__(JavaClass, name, bases, attr)
     
     # Link the Java methods to Python
-    cdef jfieldID self_fid = env.GetFieldID(clazz, u'__pyjvm_self$$', u'J')
     cdef jint n_nat_meths = len(meth_infos) - ctors
     cdef list names = [to_utf8j(mi.name) for mi in meth_infos if (mi.mod&NATIVE) != 0] # we need to cache these so we can get the C-temporaries
     cdef list sigs  = [to_utf8j(mi.sig)  for mi in meth_infos if (mi.mod&NATIVE) != 0]
@@ -466,7 +456,7 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
             if (mi.mod&NATIVE) == 0: continue
             nat_meths[i].name = names[i]
             nat_meths[i].signature = sigs[i]
-            nat_meths[i].fnPtr = create_bridge(env, jcls, self_fid, mi.pymeth, mi.sig, (mi.mod&PRIVATE)==PRIVATE)
+            nat_meths[i].fnPtr = create_bridge(env, mi.pymeth, mi.sig)
             i += 1
         env.RegisterNatives(clazz, nat_meths, n_nat_meths)
     finally: free(nat_meths)
