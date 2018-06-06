@@ -127,7 +127,7 @@ def py2object_py(JEnv env, object x, JClass target):
     """
     Python-accessible version of the function above, returnning a JObject instead of a jobject.
     """
-    return JObject.wrap_local(env, py2object(env, x, target))
+    return JObject.wrap_local(py2object(env, x, target))
 
 cdef inline P2JQuality AVG_QUAL(P2JQuality a, P2JQuality b): return <P2JQuality>((a+b)//2)
 ctypedef P2JConvert (*p2j_any_lookup)(JEnv env, object x, JClass target, P2JQuality* q)

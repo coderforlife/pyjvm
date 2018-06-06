@@ -353,12 +353,12 @@ cdef class JObject(object):
         env.DeleteRef(obj)
         return o
     @staticmethod
-    cdef inline JObject wrap(JEnv env, jobject obj):
+    cdef inline JObject wrap(jobject obj):
         cdef JObject o = JObject()
         o.obj = obj
         return o
     @staticmethod
-    cdef inline JObject wrap_local(JEnv env, jobject obj):
+    cdef inline JObject wrap_local(jobject obj):
         cdef JObject o = JObject()
         o.obj = obj
         o.destroy = o.__destroy_local
