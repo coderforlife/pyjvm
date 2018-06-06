@@ -42,7 +42,8 @@ Internal functions:
     select_method    - select a method from a list of signatures based on a signature given
     conv_method_args - select a method from a list and convert method arguments based on arguments given
     conv_method_args_single - convert method arguments for a single Java method (not a list)
-    free_method_args - free converted method arguments
+    free_method_args        - free converted method arguments
+    get_parameter_sig       - get a valid Java signature of a single type (not necessarily parameters only)
 
 Internal function types:
     p2j_check - function that checks the quality of a Python-to-Java conversion
@@ -68,7 +69,7 @@ from cpython.datetime cimport PyDateTime_DATE_GET_MINUTE, PyDateTime_DATE_GET_SE
 cdef extern from "Python.h":
     PY_LONG_LONG PyLong_AsLongLongAndOverflow(object vv, int *overflow) except? -1
     
-from .utils cimport is_string, to_unicode
+from .utils cimport is_string, to_unicode, is_callable
 from .unicode cimport from_utf8j
 
 from .jni cimport jobject, jarray, jobjectArray, jvalue, jsize, jstring
@@ -303,11 +304,7 @@ def register_converter(type python_type, java_class, check_func):
     first one found with the best quality is used.
     """
     from .objects import JavaClass
-    IF PY_VERSION >= PY_VERSION_3_2 or PY_VERSION < PY_VERSION_3:
-        if not isinstance(java_class, JavaClass) or not callable(check_func): raise TypeError()
-    ELSE:
-        from collections import Callable
-        if not isinstance(java_class, JavaClass) or not isinstance(check_func, Callable): raise TypeError()
+    if not isinstance(java_class, JavaClass) or not is_callable(check_func): raise TypeError()
     p2js.append(P2J.create_py(python_type, java_class.__jclass__, check_func))
 
 cdef reg_conv_cy(JEnv env, pytype, unicode cn, p2j_check check):

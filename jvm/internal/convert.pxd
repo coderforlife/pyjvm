@@ -82,3 +82,4 @@ cdef JMethod select_method(list methods, key, unicode pre=*)
 cdef JMethod conv_method_args(JEnv env, list methods, tuple args, jvalue** _jargs)
 cdef jvalue* conv_method_args_single(JEnv env, JMethod method, tuple args) except? NULL
 cdef int free_method_args(JEnv env, JMethod m, jvalue* jargs) except -1
+cdef unicode get_parameter_sig(c)

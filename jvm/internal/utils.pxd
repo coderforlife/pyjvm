@@ -49,7 +49,13 @@ ELSE:
     cdef inline object KEYS(dict d):   return d.viewkeys()
     cdef inline object ITEMS(dict d):  return d.viewitems()
     cdef inline object VALUES(dict d): return d.viewvalues()
-
+cdef inline is_callable(f):
+    IF PY_VERSION >= PY_VERSION_3_2 or PY_VERSION < PY_VERSION_3:
+        return callable(f)
+    ELSE:
+        from collections import Callable
+        return isinstance(f, Callable)
+        
 # For conditional GIL release
 from cpython.pystate cimport PyThreadState
 cdef extern from "Python.h":
