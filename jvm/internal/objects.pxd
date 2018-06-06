@@ -32,8 +32,8 @@ cdef inline jclass get_class(cls):
 cdef inline jobject get_object(obj):
     """Gets the jobject of an Object"""
     return (<JObject>obj.__object__).obj
-cdef inline jint get_identity(obj):
-    """Gets the identity (hash code) of an Object"""
+cdef inline jint java_id(jobject obj):
+    """Like id() but for jobjects, getting the identity of the object"""
     cdef jvalue val
-    val.l = (<JObject>obj.__object__).obj
+    val.l = obj
     return jenv().CallStaticInt(SystemDef.clazz, SystemDef.identityHashCode, &val)
