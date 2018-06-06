@@ -594,6 +594,55 @@ all of the methods and fields listed above must be used directly without introsp
 for smaller arrays.
 
 
+Extending Java Classes
+----------------------
+Besides being able to use Java classes and methods in Python, PyJVM also allows extending Java
+classes and implementing Java interfaces with Python classes. This allows having "callbacks" by
+implementing abstract methods. Extension classes are defined using a set of decorators on methods
+and on the class itself. A basic example would be defining a `Runnable` that executes a Python
+method:
+
+    @jvm.extends(java.lang.Runnable)
+    class PyRunnable:
+        @jvm.override
+        def run(self): print('running!')
+
+A more complicated example would be to implement the `List` interface, partially listed here:
+
+    @jvm.extends(java.util.List)
+    class PyList:
+		lst = None # any Python fields must be specified in the class otherwise they will be un-settable
+	
+        # All public and protected constructors in the superclass (in this case java.lang.Object
+        # which has a single, parameter-less constructor) are implemented and forward to the
+        # `__init__` method. This method must be able to accept any possible combination of
+        # arguments from those constructors. If not provided, then a default, do-nothing,
+        # `__init__` method is provided.
+        def __init__(self):
+            self.lst = []
+        
+        @jvm.override
+        @jvm.param(object) # all parameters must be listed
+        @jvm.return(bool)  # these use the same format that methods/constructor lookups use
+        def add(self, e):
+            self.lst.append(e)
+            return True
+
+        @jvm.override('run') # Java can have multiple methods with the same name but not in Python
+        # the above statement will override an `add` method even though it is called `insert`
+        @jvm.param(int)      # first argument
+        @jvm.param(object)   # second argument
+        # could also do both at the same time: @jvm.param(int, object)
+        # no @jvm.return(...) means void
+        @jvm.throws(java.lang.IndexOutOfBoundsException) # technically unnecessary
+        def insert(self, i, e):
+            if i < 0 or i >= len(self.lst): raise java.lang.IndexOutOfBoundsException()
+            self.lst.insert(i, e)
+            
+        # The rest of the methods... if any abstract or interface method is left unimplemented,
+        # the extension class will be marked "abstract".
+
+
 Other Methods
 -------------
 A few other methods and utilities are available in the `J` and `jvm` modules:

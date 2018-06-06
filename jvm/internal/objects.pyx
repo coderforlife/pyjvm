@@ -647,7 +647,10 @@ cdef int init_objects(JEnv env) except -1:
             Set a Java field value. The field value can be on this class or any of the
             superclasses.
             """
-            self._jsetattr(to_unicode(name), value)
+            if name in self.__dict__ or name in self.__class__.__dict__:
+                self.__dict__[name] = value
+            else:
+                self._jsetattr(to_unicode(name), value)
         def __dir__(self):
             cdef JClass c = get_object_class(self)
             cdef set members = set(), shadowed = set()
