@@ -190,7 +190,7 @@ cdef class JEnv(object):
         cdef jobject obj = self.env[0].AllocObject(self.env, clazz)
         if obj is NULL: self.__raise_exception()
         return obj
-    cdef jobject NewObject(self, jclass clazz, jmethodID methodID, const jvalue *args=NULL, bint withgil=True) except NULL:
+    cdef jobject NewObject(self, jclass clazz, jmethodID methodID, const jvalue *args, bint withgil) except NULL:
         assert clazz is not NULL and methodID is not NULL
         cdef PyThreadState* gilstate = NULL if withgil else PyEval_SaveThread()
         cdef jobject out = self.env[0].NewObjectA(self.env, clazz, methodID, args)

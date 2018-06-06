@@ -53,7 +53,7 @@ def add_class_path(unicode path):
     try:
         if not env.IsInstanceOf(scl, URLClassLoaderDef.clazz): raise RuntimeError(u'System class loader must be a URLClassLoader for add_class_path to work once the JVM has started')
         val.l = env.NewString(path)
-        try: f = env.NewObject(FileDef.clazz, FileDef.ctor, &val)
+        try: f = env.NewObject(FileDef.clazz, FileDef.ctor, &val, True)
         finally: env.DeleteLocalRef(val.l)
         try: uri = env.CallObject(f, FileDef.toURI)
         finally: env.DeleteLocalRef(f)

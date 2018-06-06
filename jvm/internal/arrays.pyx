@@ -156,10 +156,10 @@ cdef inline tuple check_slice(object start, object stop, object step, jsize n):
     if i > j: raise IndexError(u'%d > %d' % (i,j))
     return i,j
 cdef inline withgil(Py_ssize_t n):
-    """Releasing the GIL takes 100-200ns, so only release it for larger operations"""
+    """Releasing the GIL takes 50-100ns, so only release it for larger operations"""
     # memcpy can probably copy about 10-20 bytes/ns
     # Doing any operations probably costs about 10-40 ns/element
-    # so when called with a copy command, divide n by (100/itemsize, 128/itemsize so a power of two), otherwise use the big-O n
+    # so when called with a copy command, divide n by 128/itemsize, otherwise use the big-O n
     return n < 1024
 
 cdef inline int arraycopy(JEnv env, jarray src, jint srcPos, jarray dest, jint destPos, jint length) except -1:

@@ -377,34 +377,34 @@ cdef jmethodID box_ctors[8]
 #cdef inline jobject box_boolean(JEnv env, jboolean x) except NULL:
 #    cdef jvalue val
 #    val.z = x
-#    return env.NewObject(box_classes[0], box_ctors[0], &val)
+#    return env.NewObject(box_classes[0], box_ctors[0], &val, True)
 cdef inline jobject box_boolean(JEnv env, jboolean x) except NULL:
     return env.NewLocalRef(Boolean_TRUE if x == JNI_TRUE else Boolean_FALSE)
 cdef inline jobject box_byte(JEnv env, jbyte x) except NULL:
     cdef jvalue val
     val.b = x
-    return env.NewObject(box_classes[1], box_ctors[1], &val)
+    return env.NewObject(box_classes[1], box_ctors[1], &val, True)
 cdef inline jobject box_char(JEnv env, jchar x) except NULL:
     cdef jvalue val
     val.c = x
-    return env.NewObject(box_classes[2], box_ctors[2], &val)
+    return env.NewObject(box_classes[2], box_ctors[2], &val, True)
 cdef inline jobject box_short(JEnv env, jshort x) except NULL:
     cdef jvalue val
     val.s = x
-    return env.NewObject(box_classes[3], box_ctors[3], &val)
+    return env.NewObject(box_classes[3], box_ctors[3], &val, True)
 cdef inline jobject box_int(JEnv env, jint x) except NULL:
     cdef jvalue val
     val.i = x
-    return env.NewObject(box_classes[5], box_ctors[5], &val)
+    return env.NewObject(box_classes[5], box_ctors[5], &val, True)
 cdef inline jobject box_long(JEnv env, jlong x) except NULL:
     cdef jvalue val
     val.j = x
-    return env.NewObject(box_classes[5], box_ctors[5], &val)
+    return env.NewObject(box_classes[5], box_ctors[5], &val, True)
 cdef inline jobject box_float(JEnv env, jfloat x) except NULL:
     cdef jvalue val
     val.f = x
-    return env.NewObject(box_classes[6], box_ctors[6], &val)
+    return env.NewObject(box_classes[6], box_ctors[6], &val, True)
 cdef inline jobject box_double(JEnv env, jdouble x) except NULL:
     cdef jvalue val
     val.d = x
-    return env.NewObject(box_classes[7], box_ctors[7], &val)
+    return env.NewObject(box_classes[7], box_ctors[7], &val, True)

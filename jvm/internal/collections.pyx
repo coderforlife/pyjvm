@@ -154,14 +154,14 @@ cdef int init_collections(JEnv env) except -1:
             nv = value._jcall0(u'size')
             if nv == n:
                 val[1].l = get_object(value)
-                env.CallStaticVoidMethod(Collections, CollectionsDef.copy, val, n <= 100)
+                env.CallStaticVoidMethod(Collections, CollectionsDef.copy, val, n <= 256)
             elif nv < n:
                 val[1].l = get_object(value)
-                env.CallStaticVoidMethod(Collections, CollectionsDef.copy, val, nv <= 100)
+                env.CallStaticVoidMethod(Collections, CollectionsDef.copy, val, nv <= 256)
                 sub._jcall2(u'subList', nv, n)._jcall0(u'clear')
             else: # n > nv
                 val[1].l = get_object(value._jcall2(u'subList', 0, n))
-                env.CallStaticVoidMethod(Collections, CollectionsDef.copy, val, n <= 100)
+                env.CallStaticVoidMethod(Collections, CollectionsDef.copy, val, n <= 256)
                 sub._jcall1(u'addAll', value._jcall2(u'subList', n, nv))
         elif isinstance(value, collections.Iterable):
             it = iter(value)
@@ -172,7 +172,7 @@ cdef int init_collections(JEnv env) except -1:
         else:
             val[0].l = get_object(sub)
             val[1].l = py2object(env, value, JClass.named(env, u'java.lang.Object'))
-            try: env.CallStaticVoidMethod(Collections, CollectionsDef.fill, val, n <= 100)
+            try: env.CallStaticVoidMethod(Collections, CollectionsDef.fill, val, n <= 256)
             finally:
                 if val[1].l is not NULL: env.DeleteLocalRef(val[1].l)
     
@@ -237,22 +237,22 @@ cdef int init_collections(JEnv env) except -1:
             cdef jvalue val[2]
             val[0].l = get_object(self)
             val[1].l = py2object(env, value, JClass.named(env, u'java.lang.Object'))
-            try: return env.CallStaticIntMethod(Collections, CollectionsDef.frequency, val, self._jcall0(u'size') <= 100)
+            try: return env.CallStaticIntMethod(Collections, CollectionsDef.frequency, val, self._jcall0(u'size') <= 256)
             finally:
                 if val[1].l is not NULL: env.DeleteLocalRef(val[1].l)
         def reverse(self):
             cdef jvalue val
             val.l = get_object(self)
-            jenv().CallStaticVoidMethod(Collections, CollectionsDef.reverse, &val, self._jcall0(u'size') <= 100)
+            jenv().CallStaticVoidMethod(Collections, CollectionsDef.reverse, &val, self._jcall0(u'size') <= 256)
         def sort(self, c=None):
             cdef JEnv env = jenv()
             cdef jvalue val[2]
             val[0].l = get_object(self)
             if c is None:
-                env.CallStaticVoidMethod(Collections, CollectionsDef.sort, val, self._jcall0(u'size') <= 50)
+                env.CallStaticVoidMethod(Collections, CollectionsDef.sort, val, self._jcall0(u'size') <= 64)
             else:
                 val[1].l = py2object(env, c, JClass.named(env, u'java.util.Comparator'))
-                try: env.CallStaticVoidMethod(Collections, CollectionsDef.sort_c, val, self._jcall0(u'size') <= 50)
+                try: env.CallStaticVoidMethod(Collections, CollectionsDef.sort_c, val, self._jcall0(u'size') <= 64)
                 finally: env.DeleteLocalRef(val[1].l)
         def binarySearch(self, key, c=None):
             if c is None:

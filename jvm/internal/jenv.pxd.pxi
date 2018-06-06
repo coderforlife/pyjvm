@@ -185,7 +185,7 @@ cdef class JEnv(object):
 
     # Object Operations
     cdef jobject AllocObject(self, jclass clazz) except NULL
-    cdef jobject NewObject(self, jclass clazz, jmethodID methodID, const jvalue *args=*, bint withgil=*) except NULL
+    cdef jobject NewObject(self, jclass clazz, jmethodID methodID, const jvalue *args, bint withgil) except NULL
     cdef inline jclass GetObjectClass(self, jobject obj) except NULL:
         assert obj is not NULL
         cdef jclass clazz = self.env[0].GetObjectClass(self.env, obj)

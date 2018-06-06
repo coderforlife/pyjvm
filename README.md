@@ -188,12 +188,13 @@ yielding `JavaMethod` objects. Similarily, a `JavaClass` object can be iterated 
 **Note:** when using the brackets, var-args must be given as an array type, but when called the
 array will be created automatically if necessary
 
-Methods and constructors can also take a keyword argument `withgil` that if set to `False` will
-cause the GIL to be released for the duration of the call. There is some slight overhead in
-releasing the GIL, but it is highly recommended to do so for any lengthy or I/O operations so that
-other Python threads may work. Example:
+Methods and constructors can also take a keyword argument `withgil` that if set to `True` will
+cause the GIL to not be released for the duration of the call. There is some slight overhead in
+releasing the GIL but releasing it reduces the chance of deadlocks. If you have to call certain
+methods quickly and frequently and know that they won't cause Python to cause a deadlock then
+don't release it. Example:
 
-    myObject.long_operatation(5, withgil=False) # calls without GIL while passing 5 to the method
+    myObject.quick(5, withgil=True) # calls with GIL while passing 5 to the method
 
 
 Access Modifiers
@@ -589,7 +590,8 @@ The class of the array can be obtained with an empty slice:
 **Note:** when using `dir` on Java arrays, only the methods defined in `java.lang.Object` show up,
 all of the methods and fields listed above must be used directly without introspection
 
-**Note:** most array methods will automatically release the GIL if the array is large enough
+**Note:** most array methods will automatically release the GIL if the array is large enough but not
+for smaller arrays.
 
 
 Other Methods

@@ -474,7 +474,7 @@ cdef class RunnableAction(JVMAction):
     """Calls obj.run() with or without the GIL"""
     cpdef run(self, JEnv env):
         assert self.obj is not NULL
-        env.CallVoidMethod(self.obj, RunnableDef.run, NULL, False)
+        env.CallVoidMethod(self.obj, RunnableDef.run, NULL, self.withgil)
 cdef class GCAction(JVMAction):
     """Calls java.lang.System.gc() and Python's gc.collect()"""
     cpdef run(self, JEnv env):

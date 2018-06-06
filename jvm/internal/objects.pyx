@@ -184,7 +184,7 @@ class JavaClass(type):
         cdef JField field = clazz.static_fields[name]
         if field.is_final(): raise AttributeError(u"Can't set final static field")
         field.type.funcs.set_static(jenv(), clazz.clazz, field, value)
-    def __call__(self, *args):
+    def __call__(self, *args, withgil=False):
         """
         Call a Java constructor for this class based on the arguments and return a new instance of
         this class. Constructors do not inherit so must be declared on this class. If there is
@@ -197,7 +197,7 @@ class JavaClass(type):
         cdef JEnv env = jenv()
         cdef jvalue* jargs
         cdef JMethod m = conv_method_args(env, clazz.constructors, args, &jargs)
-        try: return create_java_object(env.NewObject(clazz.clazz, m.id, jargs))
+        try: return create_java_object(env.NewObject(clazz.clazz, m.id, jargs, withgil))
         finally: free_method_args(env, m, jargs)
     def __getitem__(self, ind):
         """
@@ -324,7 +324,7 @@ cdef class JavaMethods(object):
                     sigs.add(sig)
             cls = cls.superclass
         return methods
-    def __call__(self, *args, withgil=True):
+    def __call__(self, *args, withgil=False):
         cdef JEnv env = jenv()
         cdef jvalue* jargs = NULL
         cdef JMethod m = conv_method_args(env, self.methods, args, &jargs)
@@ -350,7 +350,7 @@ cdef class JavaStaticMethods(JavaMethods):
     # __self__ is a JavaClass
     _JavaMethod = JavaStaticMethod
     def _get_methods(self, obj, unicode name): return (<JClass>obj.__jclass__).static_methods[name]
-    def __call__(self, *args, withgil=True):
+    def __call__(self, *args, withgil=False):
         cdef JEnv env = jenv()
         cdef jvalue* jargs = NULL
         cdef JMethod m = conv_method_args(env, self.methods, args, &jargs)
@@ -388,7 +388,7 @@ cdef class JavaMethod(object):
 cdef class JavaStaticMethod(JavaMethod):
     """A single Java static method."""
     # __self__ is a JavaClass
-    def __call__(self, *args, withgil=True):
+    def __call__(self, *args, withgil=False):
         cdef JEnv env = jenv()
         cdef JMethod m = self.method
         cdef jvalue* jargs = conv_method_args_single(env, m, args)
@@ -408,7 +408,7 @@ cdef class JavaConstructor(object):
         self.im_class = clazz
         self.__self__ = obj
         self.method = method
-    def __call__(self, *args, withgil=True):
+    def __call__(self, *args, withgil=False):
         cdef JEnv env = jenv()
         if self.__self__ is not None: args = (self.__self__,) + tuple(args)
         cdef jvalue* jargs = conv_method_args_single(env, self.method, args)
@@ -683,7 +683,7 @@ cdef int init_objects(JEnv env) except -1:
         def __exit__(self ,type, value, traceback): self._jcall0(u'close'); return False
     @template(u'java.lang.Cloneable')
     class Cloneable(object):
-        def __copy__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.clone, NULL, True)
+        def __copy__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.clone, NULL, False)
     @template(u'java.lang.Comparable')
     class Comparable(object):
         def __lt__(self, other): return self._jcall1(u'compareTo', other) < 0
