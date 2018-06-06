@@ -40,15 +40,15 @@ cdef inline unicode to_unicode(basestring s):
     IF PY_VERSION >= PY_VERSION_3: return s
     ELSE: return PyUnicode_DecodeASCII(<bytes>s, len(s), NULL) if PyBytes_Check(s) else s
 IF PY_VERSION >= PY_VERSION_3:
-    cdef inline bint is_string(s):     return PyUnicode_Check(s)
-    cdef inline object KEYS(dict d):   return d.keys()
-    cdef inline object ITEMS(dict d):  return d.items()
-    cdef inline object VALUES(dict d): return d.values()
+    cdef inline bint is_string(s): return PyUnicode_Check(s)
+    cdef inline object KEYS(d):    return d.keys()
+    cdef inline object ITEMS(d):   return d.items()
+    cdef inline object VALUES(d):  return d.values()
 ELSE:
-    cdef inline bint is_string(s):     return PyBytes_Check(s) or PyUnicode_Check(s) 
-    cdef inline object KEYS(dict d):   return d.viewkeys()
-    cdef inline object ITEMS(dict d):  return d.viewitems()
-    cdef inline object VALUES(dict d): return d.viewvalues()
+    cdef inline bint is_string(s): return PyBytes_Check(s) or PyUnicode_Check(s)
+    cdef inline object KEYS(d):    return d.viewkeys()
+    cdef inline object ITEMS(d):   return d.viewitems()
+    cdef inline object VALUES(d):  return d.viewvalues()
 cdef inline is_callable(f):
     IF PY_VERSION >= PY_VERSION_3_2 or PY_VERSION < PY_VERSION_3:
         return callable(f)
