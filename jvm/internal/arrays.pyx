@@ -1588,8 +1588,8 @@ def long_array   (*args): return JPrimitiveArray.create(args, get_java_class(u'[
 def float_array  (*args): return JPrimitiveArray.create(args, get_java_class(u'[F'), &jpad_float)
 def double_array (*args): return JPrimitiveArray.create(args, get_java_class(u'[D'), &jpad_double)
 def object_array (*args, type=None):
-    if type is None: type = get_java_class(u'java.util.Class')
-    return JObjectArray.create(args, type)
+    if type is None: type = get_java_class(u'java.lang.Object')
+    return JObjectArray.create(args, type.__jclass__)
 
     
 ########## Conversion Functions ##########
