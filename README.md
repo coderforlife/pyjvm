@@ -158,14 +158,14 @@ proper one by its signature. Some examples:
     java.lang.System.out.println['java.lang.String']('Hi') # selects the method that takes 1 string
 
 These examples are simple, but hopefully you get the idea. You can specify a single string that
-gives the parameter type signature or the full method signature (as given by the `javap` program,
-with . or / as separators). Or one value can be given for each parameter which is either a string
+gives the parameter type signature or the full method signature (as given by `javap -s`, with . or
+/ as separators). Or one value can be given for each parameter which is either a string
 representing the type (can be with or without the L;), or a `JavaClass` object, or a limited set of
 obvious Python types (`object` to `java.lang.Object`, unicode `str` to `java.lang.String`, `bytes` to 
 `[B`, `bool` to `Z`, `int` to `I`, `float` to `D`).
 
-Besides using the `javap` program to find the signatures, the available signatures can be found
-using an ellipsis in the brackets:
+Besides using `javap -s` to find the signatures, the available signatures can be found using an
+ellipsis in the brackets:
 
     sigs = java.util.Data[...]
     sigs = java.lang.System.out.println[...]
@@ -564,12 +564,12 @@ types and the reference, or object, array type in the `J` module.
    If more than one argument is given, then it is treated as a sequence and each element is
    converted.
 
- * `J.object_array(*args, type=None)`
+ * `J.object_array(*args, type=java.lang.Object)`
 
    Reference arrays support a more limited set of sources then primitive arrays. The argument `type`
-   must be given as a keyword argument. It specifies the component type of the reference array. If
-   not provided, it defaults to java.lang.Object. If there are no arguments besides type then a
-   length-0 array is created. For a single argument, the following values are acceptable:
+   must be given as a keyword argument and specifies the component type of the reference array. If
+   there are no arguments besides type then a length-0 array is created. For a single argument, the
+   following values are acceptable:
 
     * integer - creates a length-n array is created
     * Java array of a compatible component type - creates a copy with a possibly new component type
@@ -585,7 +585,7 @@ a 9-element array containing java.lang.Objects:
 
 The class of the array can be obtained with an empty slice:
 
-    cls = java.lang.Object[:]  # equivilent to the Java code Class<Object[]> cls = Object[].class
+    cls = java.lang.Object[:]  # approximately the Java code `Class<Object[]> cls = Object[].class;`
 
 **Note:** when using `dir` on Java arrays, only the methods defined in `java.lang.Object` show up,
 all of the methods and fields listed above must be used directly without introspection
