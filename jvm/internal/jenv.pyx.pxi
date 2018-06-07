@@ -133,6 +133,14 @@ cdef class JEnv(object):
     #cdef inline jclass FindClass(self, unicode name) except NULL:
     #cdef inline jclass GetSuperclass(self, jclass clazz) except? NULL:
     #cdef inline bint IsAssignableFrom(self, jclass clazz1, jclass clazz2) except -1:
+    
+    # Module Operations
+    IF JNI_VERSION >= JNI_VERSION_9:
+        cdef jobject GetModule(self, jclass clazz) except NULL:
+            assert clazz is not NULL
+            cdef jobject module = self.env[0].GetModule(self.env, clazz)
+            if module is NULL: self.__raise_exception()
+            return module
 
     # Exceptions - no error checking for any of these functions since they all manipulate the exception state
     cdef jint Throw(self, jthrowable obj):

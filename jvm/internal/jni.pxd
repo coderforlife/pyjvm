@@ -38,6 +38,8 @@ Each of them has an "A" version that takes a pointer to jvalues which should be 
 # Added in JNI v1.4: NewDirectByteBuffer, GetDirectBufferAddress, GetDirectBufferCapacity
 #
 # Added in JNI v1.6: GetObjectRefType
+#
+# Added in JNI v1.9: GetModule
 
 cdef extern from "jni.h" nogil:
     ctypedef unsigned char jboolean
@@ -119,7 +121,7 @@ cdef extern from "jni.h" nogil:
         JNI_VERSION_1_2
         JNI_VERSION_1_4
         JNI_VERSION_1_6
-        #JNI_VERSION_1_8 # no additions?
+        JNI_VERSION_9
 
     cdef enum _jobjectType:
         JNIInvalidRefType = 0,
@@ -174,6 +176,9 @@ cdef extern from "jni.h" nogil:
         jclass (*FindClass)(JNIEnv *env, const char *name) nogil
         jclass (*GetSuperclass)(JNIEnv *env, jclass clazz) nogil
         jboolean (*IsAssignableFrom)(JNIEnv *env, jclass clazz1, jclass clazz2) nogil
+
+        # Module Operations
+        jobject GetModule(JNIEnv *env, jclass clazz) nogil;
 
         # Exceptions
         jint (*Throw)(JNIEnv *env, jthrowable obj) nogil

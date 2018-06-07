@@ -114,6 +114,10 @@ cdef class JEnv(object):
         self.check_exc()
         return out
 
+    # Module Operations
+    IF JNI_VERSION >= JNI_VERSION_9:
+        cdef jobject GetModule(self, jclass clazz) except NULL;
+
     # Exceptions - no error checking for any of these functions since they all manipulate the exception state
     cdef jint Throw(self, jthrowable obj)
     cdef jint ThrowNew(self, jclass clazz, unicode message)
