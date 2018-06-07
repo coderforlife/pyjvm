@@ -30,7 +30,7 @@ DEF PY_VERSION_2=0x02000000
 DEF PY_VERSION_3=0x03000000
 DEF PY_VERSION_3_2=0x03020000
 DEF PY_VERSION_3_3=0x03030000
-#DEF PY_VERSION_3_5=0x03050000
+DEF PY_VERSION_3_5=0x03050000
 
 # Target Java SE 6 - pretty old already and it does help
 # The code requires at least JNI_VERSION_1_2. If lowered to JNI_VERSION_1_4 a fallback for deleting

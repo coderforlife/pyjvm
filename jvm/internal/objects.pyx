@@ -58,7 +58,7 @@ from .utils cimport to_unicode, KEYS
 
 from .jni cimport jclass, jobject, jfieldID, jvalue, jstring, jint
 
-from .core cimport JClass, JObject, JMethod, JField, JEnv, jenv, SystemDef, ObjectDef, protection_prefix
+from .core cimport JClass, JObject, JMethod, JField, JEnv, jenv, SystemDef, ObjectDef, class_exists, protection_prefix
 from .core cimport jvm_add_init_hook, jvm_add_dealloc_hook
 from .convert cimport P2JQuality, FAIL, P2JConvert, p2j_lookup, p2j_prim_lookup, p2j_obj_lookup
 from .convert cimport select_method, conv_method_args, conv_method_args_single, free_method_args
@@ -735,7 +735,9 @@ cdef int init_objects(JEnv env) except -1:
 
 
     ### Exceptions ###
-    def cls(cn, base): return JavaClass.__new__(JavaClass, cn, (Object,base), {'__java_class_name__':cn})
+    def cls(cn, base):
+        if class_exists(env, cn): # some of these exceptions are part of newer java versions so skip them
+            return JavaClass.__new__(JavaClass, cn, (Object,base), {'__java_class_name__':cn})
     @template(u'java.lang.Throwable', Object, Exception)
     class Throwable(object):
         IF PY_VERSION < PY_VERSION_3:
@@ -751,8 +753,12 @@ cdef int init_objects(JEnv env) except -1:
     cls(u'java.lang.LinkageError',             ImportError)
     cls(u'java.lang.VirtualMachineError',      SystemError)
     cls(u'java.lang.OutOfMemoryError',         MemoryError)
-    cls(u'java.lang.StackOverflowError',       OverflowError)
+    IF PY_VERSION >= PY_VERSION_3_5:
+        cls(u'java.lang.StackOverflowError',   RecursionError)
+    ELSE:
+        cls(u'java.lang.StackOverflowError',   RuntimeError)
     cls(u'java.lang.IllegalArgumentException', ValueError) # a few others have ValueError as well
+    cls(u'java.lang.UnsupportedOperationException', NotImplementedError)
     cls(u'java.util.NoSuchElementException',   StopIteration)
     cls(u'java.io.IOException',                IOError)
     cls(u'java.io.IOError',                    IOError)
@@ -773,7 +779,6 @@ cdef int init_objects(JEnv env) except -1:
     cls(u'java.lang.ClassCastException',                   TypeError)
     cls(u'java.lang.InstantiationException',               TypeError)
     cls(u'java.lang.IllegalStateException',                TypeError)
-    cls(u'java.lang.UnsupportedOperationException',        TypeError)
     cls(u'java.lang.reflect.UndeclaredThrowableException', TypeError)
     # IndexError
     cls(u'java.lang.IndexOutOfBoundsException',  IndexError)
@@ -782,6 +787,7 @@ cdef int init_objects(JEnv env) except -1:
     cls(u'java.nio.BufferOverflowException',     IndexError)
     cls(u'java.nio.BufferUnderflowException',    IndexError)
     # UnicodeError
+    cls(u'java.util.IllegalFormatCodePointException', UnicodeError)
     cls(u'java.nio.charset.CharacterCodingException', UnicodeError)
     cls(u'java.nio.charset.CoderMalfunctionError',    UnicodeError)
     cls(u'java.io.UTFDataFormatException',            UnicodeError)

@@ -124,7 +124,10 @@ cdef struct JThreadDef:
     jclass clazz
     jmethodID currentThread # static
     jmethodID getContextClassLoader, setContextClassLoader
-
+cdef struct JThrowableDef:
+    jclass clazz
+    jmethodID getLocalizedMessage, getStackTrace
+    
 cdef JObjectDef      ObjectDef
 cdef JSystemDef      SystemDef
 cdef JClassLoaderDef ClassLoaderDef
@@ -138,6 +141,7 @@ cdef JMethodDef      MethodDef
 cdef JConstructorDef ConstructorDef
 cdef JRunnableDef    RunnableDef
 cdef JThreadDef      ThreadDef
+cdef JThrowableDef   ThrowableDef
 
 
 ########## Basic actions that can be queued in the JVM thread ##########
@@ -219,6 +223,13 @@ cdef inline unicode protection_prefix(Modifiers mod):
     if   mod & PUBLIC:    return u''
     elif mod & PROTECTED: return u'_'
     else:                 return u'__' # private OR package-private
+
+cdef inline bint class_exists(JEnv env, unicode name):
+    """Checks if a class exists with the given name."""
+    cdef jclass clazz = env.env[0].FindClass(env.env, to_utf8j(name.replace(u'.', u'/')))
+    if clazz is NULL: env.env[0].ExceptionClear(env.env); return False
+    env.DeleteLocalRef(clazz)
+    return True
 
 cdef class JBase(object):
     cdef readonly unicode name

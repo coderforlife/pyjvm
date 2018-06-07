@@ -51,10 +51,12 @@ Internal values:
     ConstructorDef - common jmethodIDs needed from java.lang.reflect.Constructor
     RunnableDef    - common jmethodIDs needed from java.lang.Runnable
     ThreadDef      - common jmethodIDs needed from java.lang.Thread
+    ThrowableDef   - common jmethodIDs needed from java.lang.Throwable
 
 Internal functions:
-    box_<primitive>   - box a primitive value, one function for each primitive type
-    protection_prefix - get the Python prefix (e.g. '__') for an access modifier
+    class_exists       - check if a Java class exists with a given name
+    box_<primitive>    - box a primitive value, one function for each primitive type
+    protection_prefix  - get the Python prefix (e.g. '__') for an access modifier
     delete_global_ref  - eithers calls DeleteGlobalRef now or as an action on the JVM thread
     unregister_natives - eithers calls UnregisterNatives now or as an action on the JVM thread
 
@@ -425,6 +427,18 @@ cdef void dealloc_ThreadDef(JNIEnv* env) nogil:
     ThreadDef.getContextClassLoader = NULL
     ThreadDef.setContextClassLoader = NULL
 
+cdef void init_ThrowableDef(JNIEnv* env) nogil:
+    cdef jclass C = FindClass(env, b'java/lang/Throwable')
+    ThrowableDef.clazz = <jclass>NewGlobalRef(env, C)
+    ThrowableDef.getLocalizedMessage = GetMethodID(env, C, b'getLocalizedMessage', b'()Ljava/lang/String;')
+    ThrowableDef.getStackTrace       = GetMethodID(env, C, b'getStackTrace', b'()[Ljava/lang/StackTraceElement;')
+    DeleteLocalRef(env, C)
+cdef void dealloc_ThrowableDef(JNIEnv* env) nogil:
+    if ThrowableDef.clazz is not NULL: DeleteGlobalRef(env, ThrowableDef.clazz)
+    ThrowableDef.clazz               = NULL
+    ThrowableDef.getLocalizedMessage = NULL
+    ThrowableDef.getStackTrace       = NULL
+
 cdef int init_def(JEnv env) except -1:
     with nogil:
         init_ObjectDef     (env.env)
@@ -438,6 +452,7 @@ cdef int init_def(JEnv env) except -1:
         init_ConstructorDef(env.env)
         init_RunnableDef   (env.env)
         init_ThreadDef     (env.env)
+        init_ThrowableDef  (env.env)
     return 0
 cdef int dealloc_def(JEnv env) except -1:
     with nogil:
@@ -452,6 +467,7 @@ cdef int dealloc_def(JEnv env) except -1:
         dealloc_ConstructorDef(env.env)
         dealloc_RunnableDef   (env.env)
         dealloc_ThreadDef     (env.env)
+        dealloc_ThrowableDef  (env.env)
     return 0
 jvm_add_init_hook(init_def, -10)
 jvm_add_dealloc_hook(dealloc_def, -10)
