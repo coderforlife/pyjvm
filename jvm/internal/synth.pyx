@@ -37,12 +37,12 @@ from libc.stdint cimport uint16_t, uint32_t, uint64_t, int32_t, int64_t, uintptr
 from .utils cimport to_unicode, is_callable, VALUES
 from .unicode cimport to_utf8j, unichr
 
-from .jni cimport jclass, jfieldID, jobject, jvalue, jint, JNIEnv, JNINativeMethod
+from .jni cimport jclass, jfieldID, jobject, jthrowable, jvalue, jint, JNIEnv, JNINativeMethod
 
-from .core cimport JObject, JClass, JMethod, JField, JEnv, jenv, ClassLoaderDef, unregister_natives
+from .core cimport JObject, JClass, JMethod, JField, JEnv, jenv, ClassLoaderDef, ThrowableDef, class_exists, unregister_natives
 from .core cimport Modifiers, PUBLIC, PRIVATE, PROTECTED, STATIC, FINAL, SUPER, NATIVE, ABSTRACT, SYNTHETIC
 from .core cimport py2boolean, py2byte, py2char, py2short, py2int, py2long, py2float, py2double
-from .objects cimport create_java_object
+from .objects cimport create_java_object, get_object_class, get_object
 from .convert cimport object2py, py2object, get_parameter_sig
 
 from io import BytesIO
@@ -122,20 +122,20 @@ cdef class ConstantPool(object):
         return self.__get(tag+u2(self.cls_name(cls))+u2(self.nt(name, sig)))
 
     cdef inline uint16_t nt(self, unicode name, unicode type) except? 0xFFFF:
-        return self.__get(b'\x0C'+u2(self.utf8(name))+u2(self.utf8(type)))
+        return self.__get(b'\x0C'+u2(self.utf8(name))+u2(self.utf8(type.replace(u'.', '/'))))
 
     cdef inline uint16_t nt_method(self, JMethod val) except? 0xFFFF:
         return self.nt(u'<init>' if val.is_ctor() else val.name, val.sig())
 
     cdef inline uint16_t method_handle(self, unsigned char ref_kind, ref) except? 0xFFFF:
         if 1 <= ref_kind <= 4 and isinstance(ref, JField):
-            return self.__get(b'\x0F'+u1(ref_kind)+u2(self.field_ref(ref)))
+            return self.__get(b'\x0F'+u1(ref_kind)+u2(self.field_ref_1(ref)))
         elif 5 <= ref_kind <= 9 and isinstance(ref, JMethod) and (ref_kind == 9) == (<JMethod>ref).declaring_class.is_interface():
             return self.__get(b'\x0F'+u1(ref_kind)+u2(self.method_ref_1(ref)))
         else: raise ValueError()
         
     cdef inline uint16_t method_type(self, JMethod method) except? 0xFFFF:
-        return self.__get(b'\x10'+self.utf8(method.sig()))
+        return self.__get(b'\x10'+self.utf8(method.sig().replace(u'.', '/')))
 
     cdef inline uint16_t invoke_dynamic(self, uint16_t bootstrap_mthd_attr_idx, JMethod method) except? 0xFFFF:
         return self.__get(b'\x12'+u2(bootstrap_mthd_attr_idx)+self.nt_method(method))
@@ -145,13 +145,6 @@ cdef random_string():
     opts = string.ascii_letters + string.digits
     return u''.join(random.choice(opts) for _ in range(20))
         
-cdef bint class_exists(JEnv env, unicode name):
-    """Checks if a class already exists with the given name."""
-    cdef jclass clazz = env.env[0].FindClass(env.env, to_utf8j(name.replace(u'.', u'/')))
-    if clazz is NULL: env.env[0].ExceptionClear(env.env); return False
-    env.DeleteLocalRef(clazz)
-    return True
-
 cdef bytes ctor_code_attr(ConstantPool constants, JMethod ctor, unicode clsname=None, unicode method=None):
     """
     Creates a constructor Code attribute including the compiled bytecode. The constructor is
@@ -176,7 +169,7 @@ cdef bytes ctor_code_attr(ConstantPool constants, JMethod ctor, unicode clsname=
     cdef unsigned char opcode
     cdef uint16_t i, n = len(ctor.param_types) + 1
     for i in xrange(1, n):
-        c = ctor.param_types[i]
+        c = ctor.param_types[i-1]
         if   c.funcs.sig == b'J': opcode = 0x16 # long
         elif c.funcs.sig == b'F': opcode = 0x17 # float
         elif c.funcs.sig == b'D': opcode = 0x18 # double
@@ -220,6 +213,9 @@ cdef class MethodInfo(object):
     cdef inline MethodInfo create(JMethod method):
         return MethodInfo(method.modifiers, method.name, method.sig(), method.exc_types)
 
+cdef inline bint is_throwable(JEnv env, jclass clazz):
+    return env.env[0].IsAssignableFrom(env.env, clazz, ThrowableDef.clazz)
+
 cdef inline int all_methods(list classes, dict abstract, dict concrete) except -1: # [JClass], {(name,param_sig):MethodInfo}
     cdef JClass cls
     for cls in classes: all_methods_1(cls, abstract, concrete)
@@ -235,7 +231,7 @@ cdef int all_methods_1(JClass cls, dict abstract, dict concrete) except -1:
             nt = (method.name, method.param_sig())
             if nt in concrete:
                 mi = concrete[nt]
-                if mi.sig != method.sig() or mi.exceptions - method.exc_types: raise ValueError('unable to resolve methods')
+                if mi.sig != method.sig() or mi.exceptions - set(method.exc_types): raise ValueError('unable to resolve methods')
             elif nt in abstract:
                 mi = abstract[nt]
                 if mi.sig != method.sig(): raise ValueError('unable to resolve methods')
@@ -270,6 +266,8 @@ cdef dict java2ctypes = {
 cdef inline void* ptr(uintptr_t x): return <void*>x
 
 cdef void* create_bridge(JEnv env, method, unicode sig) except NULL:
+    from .objects import JavaClass
+
     # Parse the signature
     last_paren = sig.rindex(u')')
     param_sigs = break_param_sig(sig[1:last_paren])
@@ -308,7 +306,13 @@ cdef void* create_bridge(JEnv env, method, unicode sig) except NULL:
             if return_sig == u'F': return py2float(retval)
             if return_sig == u'D': return py2double(retval)
             return None #if return_sig == u'V':
-        finally: pass # TODO: implement exception handling using env.Throw or env.ThrowNew
+        except BaseException as ex:
+            # TODO: could the Python stack trace be integrated into the exception?
+            if isinstance(ex, JavaClass) and is_throwable(env, get_object_class(ex).clazz):
+                # Already a Java Throwable, just throw it
+                env.Throw(<jthrowable>get_object(ex))
+            else:
+                pass # TODO
     
     # Create the C function
     cfunctype = ctypes.CFUNCTYPE(java2ctypes[return_sig], ctypes.c_void_p, ctypes.c_void_p,
@@ -411,7 +415,7 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
     # Methods
     data.write(u2(len(meth_infos)))
     for mi in meth_infos:
-        data.write(u2(mi.mod) + u2(constants.utf8(mi.name)) + u2(constants.utf8(mi.sig)) +
+        data.write(u2(mi.mod) + u2(constants.utf8(mi.name)) + u2(constants.utf8(mi.sig.replace(u'.',u'/'))) +
                    u2(len(mi.attributes) + (1 if len(mi.exceptions) > 0 else 0)))
         for attr in mi.attributes: data.write(attr)
         if len(mi.exceptions) > 0: data.write(exceptions_attr(constants, mi.exceptions))
@@ -449,7 +453,7 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
     # Link the Java methods to Python
     cdef jint n_nat_meths = len(meth_infos) - ctors
     cdef list names = [to_utf8j(mi.name) for mi in meth_infos if (mi.mod&NATIVE) != 0] # we need to cache these so we can get the C-temporaries
-    cdef list sigs  = [to_utf8j(mi.sig)  for mi in meth_infos if (mi.mod&NATIVE) != 0]
+    cdef list sigs = [to_utf8j(mi.sig.replace(u'.', u'/')) for mi in meth_infos if (mi.mod&NATIVE) != 0]
     cdef JNINativeMethod* nat_meths = <JNINativeMethod*>malloc(n_nat_meths*sizeof(JNINativeMethod))
     try:
         for mi in meth_infos:
@@ -467,13 +471,15 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
 ########## Decorators for creating synthetic classes ##########
 def conv_types(typ, *typs):
     if len(typs) == 0:
-        # single argument - either single type or several types
-        #if is_multi_in_one: TODO
-        #    ...
-        return [get_parameter_sig(typ)]
-        
-    # multiple arguments - each must be its own type
-    return [get_parameter_sig(typ)] + [get_parameter_sig(t) for t in typs]
+        # Single argument - either single type or several types
+        try: return [get_parameter_sig(typ)]
+        except KeyError: pass
+        # Is possibly multiple signatures so break it up
+        typs = break_param_sig(typ)
+    else:
+        # Multiple arguments - each must be its own type
+        typs = [typ] + list(typs)
+    return [get_parameter_sig(t) for t in typs]
 def synth_override(name=None):
     """
     Marks a method as overriding a Java method (including interface methods, abstract methods, and
@@ -523,10 +529,9 @@ def synth_throws(typ, *typs):
     def jvm_throws(m):
         if not hasattr(m, '__pyjvm_meth__'): m.__pyjvm_meth__ = {}
         cdef JEnv env = jenv()
-        throwable = JClass.named(env, u'java.lang.Throwable')
         ts = conv_types(typ, typs)
         for t in ts:
-            if t[0] != u'L' or t[-1] != u';' or not JClass.named(env, t[1:-1]).is_sub(env, throwable):
+            if t[0] != u'L' or t[-1] != u';' or not is_throwable(env, env.FindClass(t[1:-1])):
                 raise TypeError('can only throw subclasses of java.lang.Throwable')
         m.__pyjvm_meth__.setdefault('throws', set()).update(ts)
         return m
