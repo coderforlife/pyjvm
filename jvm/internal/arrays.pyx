@@ -69,6 +69,7 @@ from cpython.object  cimport PyTypeObject
 from cpython.number  cimport PyNumber_Index
 from cpython.ref     cimport Py_INCREF
 from cpython.slice   cimport PySlice_Check
+from cpython.tuple   cimport PyTuple_Check
 from cpython.list    cimport PyList_New, PyList_SET_ITEM
 from cpython.buffer  cimport PyObject_CheckBuffer, PyObject_GetBuffer, PyBuffer_Release
 from cpython.buffer  cimport PyBUF_WRITABLE, PyBUF_INDIRECT, PyBUF_SIMPLE, PyBUF_FORMAT, PyBUF_ND
@@ -934,6 +935,9 @@ cdef class JPrimitiveArray(JArray):
         array, the length is extended and zeros are added.
         """
         cdef jsize i, j
+        if PyTuple_Check(index): # support tuples so that multi-dimensional access through object arrays work
+            if len(index) == 0: return self
+            if len(index) == 1: index = index[0]
         if PySlice_Check(index):
             if index.step is not None and index.step != 1: raise ValueError(u'only slices with a step of 1 (default) are supported')
             i = 0 if index.start is None else index.start
@@ -973,6 +977,9 @@ cdef class JPrimitiveArray(JArray):
         cdef jsize i, j, n
         cdef Py_buffer buf
         cdef JPrimArrayPointer ptr
+        if PyTuple_Check(index): # support tuples so that multi-dimensional access through object arrays work
+            if len(index) == 0: raise ValueError(u'length-0 indices not supported for setting')
+            if len(index) == 1: index = index[0]
         if PySlice_Check(index):
             from collections import Iterable, Sized
             i,j = check_slice(index.start, index.stop, index.step, self.length)
@@ -1167,19 +1174,22 @@ cdef inline unicode primarr_str(JPrimitiveArray arr):
 ##################################
 cdef class JObjectArray(JArray):
     @staticmethod
-    cdef unicode get_objarr_classname(JClass elemClass):
-        assert not elemClass.is_primitive()
-        return (u'[' + elemClass.name) if elemClass.is_array() else (u'[L%s;' % elemClass.name)
+    cdef unicode get_objarr_classname(JClass elemClass, int dim=1):
+        assert dim >= 1 and not elemClass.is_primitive()
+        brackets = u'[' * dim
+        return (brackets + elemClass.name) if elemClass.is_array() else (u'%sL%s;' % (brackets, elemClass.name))
 
     @staticmethod
-    cdef JObjectArray new_raw(JEnv env, Py_ssize_t length, JClass elementClass, jobject init = NULL):
+    cdef JObjectArray new_raw(JEnv env, Py_ssize_t length, JClass elementClass, jobject init=NULL, int dim=1):
         """
         Creates a new Java object array that has `length` elements, contains subclasses of
         `elementClass`, with each element set to `init` (default is filled with null).
         """
         if sizeof(Py_ssize_t) > sizeof(jsize) and length > 0x7FFFFFFF: raise OverflowError()
-        cdef unicode cn = JObjectArray.get_objarr_classname(elementClass)
+        cdef unicode cn = JObjectArray.get_objarr_classname(elementClass, dim)
         cdef cls = get_java_class(cn) # a subclass of JObjectArray/java.lang.Object
+        if dim > 1:
+            elementClass = JClass.named(env, JObjectArray.get_objarr_classname(elementClass, dim-1))
         cdef jobjectArray jarr = env.NewObjectArray(<jsize>length, elementClass.clazz, init)
         cdef JObjectArray arr = cls.__new__(cls, JObject.create(env, jarr))
         return arr
@@ -1271,6 +1281,12 @@ cdef class JObjectArray(JArray):
         extended and nulls are added.
         """
         cdef jsize i, j
+        if PyTuple_Check(index):
+            if len(index) == 0: return self
+            if len(index) == 1: index = index[0]
+        if PyTuple_Check(index):
+            arr = self[check_index(index[0], self.length)] # only the last index can be a slice
+            return arr[index[1:]] # recursively work on multi-dimensional indices
         if PySlice_Check(index):
             if index.step is not None and index.step != 1: raise ValueError(u'only slices with a step of 1 (default) are supported')
             i = 0 if index.start is None else index.start
@@ -1293,7 +1309,13 @@ cdef class JObjectArray(JArray):
         cdef JEnv env = jenv()
         cdef jobject obj
         cdef jsize i, j, n
-        if PySlice_Check(index):
+        if PyTuple_Check(index):
+            if len(index) == 0: raise ValueError(u'length-0 indices not supported for setting')
+            if len(index) == 1: index = index[0]
+        if PyTuple_Check(index):
+            arr = self[check_index(index[0], self.length)] # only the last index can be a slice
+            arr[index[1:]] = value # recursively work on multi-dimensional indices
+        elif PySlice_Check(index):
             from collections import Iterable, Sized
             i,j = check_slice(index.start, index.stop, index.step, self.length)
             n = j-i

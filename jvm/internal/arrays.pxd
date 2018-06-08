@@ -73,8 +73,8 @@ cdef class JPrimArrayPointer(object):
 
 cdef class JObjectArray(JArray):
     @staticmethod
-    cdef unicode get_objarr_classname(JClass elemClass)
+    cdef unicode get_objarr_classname(JClass elemClass, int dim=*)
     @staticmethod
-    cdef JObjectArray new_raw(JEnv env, Py_ssize_t length, JClass elementClass, jobject init=*)
+    cdef JObjectArray new_raw(JEnv env, Py_ssize_t length, JClass elementClass, jobject init=*, int dim=*)
     @staticmethod
     cdef JObjectArray create(object args, JClass elementClass)
