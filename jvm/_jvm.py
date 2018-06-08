@@ -204,7 +204,7 @@ def _set_proxy_functions():
     """
     import jvm # import this module itself so we can modify it...
     for name in _publicfuncs: setattr(jvm, name, __make_proxy_function(name))
-    for prim in _primitives: setattr(jvm, prim, __make_proxy_prim(prim))
+    for prim in _primitives: setattr(jvm, prim, __JavaClassProxy(prim))
 
 def __make_proxy_function(name):
     def jvm_proxy(*args):
@@ -213,13 +213,20 @@ def __make_proxy_function(name):
         return getattr(jvm.internal, name)(*args)
     return jvm_proxy
 
-def __make_proxy_prim(prim):
-    # TODO: this shouldn't return a function but something akin to a JavaClass object
-    def jvm_prim_proxy(*args):
+class __JavaClassProxy(object): # TODO: technically should inherit from type
+    def __init__(self, name): self.__name = name
+    def __get(self):
         _start_if_needed()
-        import jvm.internal
-        return getattr(jvm.internal, prim)(*args)
-    return jvm_prim_proxy
+        from .internal import get_java_class
+        return get_java_class(self.__name)
+    def __getattr__(self, name): return getattr(self.__get(), name) # only "class" will work
+    def __setattr__(self, name, value): setattr(self.__get(), name, value) # always going to fail
+    def __call__(self, *args, **kwargs): return self.__get()(*args, **kwargs) # always going to fail
+    def __getitem__(self, ind): return self.__get()[ind] # only array-based ones will work
+    def __dir__(self): return dir(self.__get()) # only "class" will work
+    def __unicode__(self): return unicode(self.__get())
+    def __str__(self): return str(self.__get())
+    def __repr__(self): return repr(self.__get())
 
 _set_proxy_functions()
 
