@@ -52,6 +52,7 @@ include "version.pxi"
 from cpython.number cimport PyNumber_Index
 from cpython.bytes  cimport PyBytes_Check
 from cpython.slice  cimport PySlice_Check
+from cpython.tuple  cimport PyTuple_Check
 from cpython.unicode cimport PyUnicode_AsUTF8String
 
 from .utils cimport to_unicode, KEYS
@@ -72,13 +73,14 @@ cpdef get_java_class(unicode classname):
     return JavaClass.__new__(JavaClass, classname, (), {'__java_class_name__':classname})
 
 cdef dict java_objects = None # TODO: would like this to contain weak references but that causes problems
+# TODO: instead of a weakref in Python we could use a PhantomReference + Cleaner in Java
 cpdef create_java_object(JEnv env, JObject _obj):
     """Creates a Java Object wrapper around the given object. The object is deleted."""
     cdef jobject obj = _obj.obj
     cdef JClass clazz = JClass.get(env, env.GetObjectClass(obj))
-    
+
     # Check if this object has a self-id and is already created
-    # TODO: could use a is_synthetic check to possibly make this faster...
+    # TODO: could use a is_synthetic check to skip this most of the time...
     cdef jfieldID self_fid = env.GetFieldID_(clazz.clazz, u'__pyjvm_self$$', u'J'), fid
     if self_fid is not NULL:
         self_id = env.GetLongField(obj, self_fid)
@@ -91,7 +93,7 @@ cpdef create_java_object(JEnv env, JObject _obj):
     if clazz.is_member() and not clazz.is_static() and clazz.declaring_class is not None:
         fid = env.GetFieldID_(clazz.clazz, u'this$0', clazz.declaring_class.sig())
         if fid is not NULL: cls = cls._bind_inner_class_to(env.GetObjectField(obj, fid))
-    
+
     # Create the Python wrapper
     py_obj = cls.__new__(cls, _obj)
     if self_fid is not NULL:
@@ -100,11 +102,39 @@ cpdef create_java_object(JEnv env, JObject _obj):
         java_objects[self_id] = py_obj
         env.env[0].SetLongField(env.env, obj, self_fid, self_id)
         env.check_exc()
+
     return py_obj
     
 cdef inline new_java_object(JEnv env, jclass clazz, JMethod m, jvalue* jargs, bint withgil):
     try: return create_java_object(env, JObject.create(env, env.NewObject(clazz, m.id, jargs, withgil)))
     finally: free_method_args(env, m, jargs)
+    
+cdef inline index_or_slice(ind):
+    """
+    Checks if a value given to __getitem__ is an index (returing an integer) or empty slice
+    (returning the empty slice). If it is neither, None is returned.
+    """
+    try: n = PyNumber_Index(ind)
+    except TypeError: pass
+    else:
+        if n < 0: raise ValueError(u'Cannot create negative sized array')
+        return n
+    if PySlice_Check(ind):
+        if ind.start is not None or ind.stop is not None or ind.step is not None:
+            raise ValueError(u'Slice can only be an empty slice')
+        return ind
+    return None
+    
+cdef create_java_array(JEnv env, JClass elemClass, list lengths, Py_ssize_t dim=0):
+    """
+    Create a multi-dimensional array recursively, trailing dimensions that are slice objects are
+    not filled in.
+    """
+    arr = JObjectArray.new_raw(env, lengths[dim], elemClass, NULL, len(lengths)-dim)
+    if dim != len(lengths) - 1 and not PySlice_Check(lengths[dim+1]):
+        for i in xrange(lengths[dim]):
+            arr[i] = create_java_array(env, elemClass, lengths, dim+1)
+    return arr
     
 def template(class_name, *bases):
     """Makes the decorated class a Java Class template with the given class name."""
@@ -225,34 +255,48 @@ class JavaClass(type):
         """
         Several operations go through the class[x] operator, depending on the type of `x`
             integer:
-                create an array with the length of `x` and the component type of `class`
-                filled with nulls
+                create an array with the length of `x` and the component type of `class` filled
+                with nulls
                 e.g.   arr = java.lang.Object[5]
-
+                
             colon:
                 get the class of the array with the component type of `class`
                 e.g.   clazz = java.lang.Object[:]
 
+            tuple:
+                create a multi-dimensional array of the component type of `class` filled with null
+                or, if using :, then the class for the multi-dimensional array
+                e.g.   clazz = java.lang.Object[:,:]
+                       arr = java.lang.Object[2,3]
+                
             ellipsis:
                 get all signatures of constructors for `class`
                 e.g.   for sig in java.lang.Object[...]: print(sig)
 
             signature:
                 get a particular JavaConstructor for a signature, which can be given as a single
-                string, a tuple of strings - one for each argument, or a tuple of JavaClass
-                objects for the argument types
+                string, a tuple of strings - one for each argument, or a tuple of JavaClass objects
+                for the argument types
         """
         cdef JClass clazz = self.__jclass__
-        cdef Py_ssize_t n
-        try: n = PyNumber_Index(ind)
-        except TypeError: pass
-        else:
-            if n < 0: raise ValueError(u'Cannot create negative sized array')
-            return JObjectArray.new_raw(jenv(), n, clazz)
-        if PySlice_Check(ind):
-            if ind.start is not None or ind.stop is not None or ind.step is not None:
-                raise ValueError(u'Slice can only be an empty slice')
-            return get_java_class(JObjectArray.get_objarr_classname(clazz))
+        x = index_or_slice(ind)
+        if PySlice_Check(x): return get_java_class(JObjectArray.get_objarr_classname(clazz))
+        elif x is not None:  return JObjectArray.new_raw(jenv(), x, clazz)
+        if PyTuple_Check(ind):
+            if len(ind) == 0: raise ValueError(u'Cannot create 0-dimensional arrays')
+            ind = [index_or_slice(x) for x in ind]
+            # Must all be indices or slices
+            if any(x is None for x in ind): raise ValueError(u'Invalid values for array dimenions')
+            # Slices can only be at the end
+            has_slice = False
+            for x in ind:
+                if PySlice_Check(x): has_slice = True
+                elif has_slice: raise ValueError(u'Slices must be at the end')
+            # Give back class if all slices
+            if has_slice and PySlice_Check(ind[0]):
+                return get_java_class(JObjectArray.get_objarr_classname(clazz, len(ind)))
+            # Create the array
+            return create_java_array(jenv(), clazz, ind)
         if clazz.is_interface(): raise TypeError(u'Cannot instantiate interfaces')
         if clazz.is_abstract(): raise TypeError(u'Cannot instantiate abstract classes')
         cdef list ctors = clazz.constructors
@@ -282,7 +326,7 @@ class JavaClass(type):
     def __repr__(self):
         cdef JClass clazz = self.__jclass__, c
         cdef Py_ssize_t n
-        if clazz.is_primitive(): return u"<Java primitive class '%s'>"%clazz.name
+        if clazz.is_primitive(): return u"<Java primitive '%s'>"%clazz.name
         if clazz.is_array():
             c = clazz.component_type; n = 1
             while c.is_array(): c = c.component_type; n += 1
@@ -596,7 +640,7 @@ cdef int init_objects(JEnv env) except -1:
             while c is not None:
                 methods = c.methods.get(name, [])
                 for m in methods:
-                    if len(m.param_types) != 1 or not m.param_types[0].is_primitive(): continue
+                    if len(m.param_types) != 1 or not (<JClass>m.param_types[0]).is_primitive(): continue
                     conv = p2j_prim_lookup(env, arg, m.param_types[0], &qual)
                     if qual <= FAIL: continue
                     conv.convert_val(env, arg, &val)
@@ -619,7 +663,7 @@ cdef int init_objects(JEnv env) except -1:
             while c is not None:
                 methods = c.methods.get(name, [])
                 for m in methods:
-                    if len(m.param_types) != 1 or m.param_types[0].is_primitive(): continue
+                    if len(m.param_types) != 1 or (<JClass>m.param_types[0]).is_primitive(): continue
                     conv = p2j_obj_lookup(env, arg, m.param_types[0], &qual)
                     if qual <= FAIL: continue
                     conv.convert_val(env, arg, &val)
@@ -736,10 +780,23 @@ cdef int init_objects(JEnv env) except -1:
 
     ### Exceptions ###
     def cls(cn, base):
-        if class_exists(env, cn): # some of these exceptions are part of newer java versions so skip them
+        if class_exists(env, cn): # some of these exceptions are part of newer Java versions so skip them
             return JavaClass.__new__(JavaClass, cn, (Object,base), {'__java_class_name__':cn})
     @template(u'java.lang.Throwable', Object, Exception)
     class Throwable(object):
+        @property
+        def __cause___(self): return self._jcall0(u'getCause')
+        #@__cause___.set
+        #def __cause___(self, c): self._jcall1(u'initCause', TODO(c))
+        # TODO
+        #@property
+        #def __traceback___(self):
+        #    import inspect
+        #    for ste in self._jcall0(u'getStackTrace')
+        #            ste._jcall0(u'getFileName'),
+        #            ste._jcall0(u'getLineNumber'),
+        #            ste._jcall0(u'getClassName') + '.' + ste._jcall0(u'getMethodName'),
+        #    return 
         IF PY_VERSION < PY_VERSION_3:
             def __unicode__(self): return self._jcall0(u'getLocalizedMessage')
             def __str__(self): return PyUnicode_AsUTF8String(self._jcall0(u'getLocalizedMessage'))
@@ -747,33 +804,53 @@ cdef int init_objects(JEnv env) except -1:
             def __str__(self): return self._jcall0(u'getLocalizedMessage')
 
     # One-to-one and obvious mappings
-    cls(u'java.lang.ArithmeticException',      ArithmeticError)
-    cls(u'java.lang.AssertionError',           AssertionError)
-    cls(u'java.lang.InterruptedException',     KeyboardInterrupt)
-    cls(u'java.lang.LinkageError',             ImportError)
-    cls(u'java.lang.VirtualMachineError',      SystemError)
-    cls(u'java.lang.OutOfMemoryError',         MemoryError)
-    IF PY_VERSION >= PY_VERSION_3_5:
-        cls(u'java.lang.StackOverflowError',   RecursionError)
-    ELSE:
-        cls(u'java.lang.StackOverflowError',   RuntimeError)
-    cls(u'java.lang.IllegalArgumentException', ValueError) # a few others have ValueError as well
+    import re, locale
+    cls(u'java.lang.ArithmeticException',           ArithmeticError)
+    cls(u'java.lang.AssertionError',                AssertionError)
+    cls(u'java.lang.InterruptedException',          KeyboardInterrupt)
+    cls(u'java.lang.ThreadDeath',                   SystemExit)
+    cls(u'java.lang.VirtualMachineError',           SystemError)
+    cls(u'java.lang.OutOfMemoryError',              MemoryError)
+    cls(u'java.lang.IllegalArgumentException',      ValueError) # a few others have ValueError as well
     cls(u'java.lang.UnsupportedOperationException', NotImplementedError)
-    cls(u'java.util.NoSuchElementException',   StopIteration)
-    cls(u'java.io.IOException',                IOError)
-    cls(u'java.io.IOError',                    IOError)
-    cls(u'java.io.EOFException',               EOFError)
+    cls(u'java.util.NoSuchElementException',        StopIteration)
+    cls(u'java.util.IllformedLocaleException',      locale.Error)
+    cls(u'java.util.regex.PatternSyntaxException',  re.error)
+    cls(u'java.io.UncheckedIOException',            IOError)
+    cls(u'java.io.IOException',                     IOError)
+    cls(u'java.io.IOError',                         IOError)
+    cls(u'java.io.EOFException',                    EOFError)
+    IF PY_VERSION >= PY_VERSION_3_3:
+        # Python 3.3 added a large number of standard exceptions related to I/O
+        cls(u'java.lang.SecurityException',         PermissionError)
+        cls(u'java.net.ConnectException',           ConnectionError)
+        cls(u'java.nio.file.FileAlreadyExistsException', FileExistsError)
+        cls(u'java.nio.file.NotDirectoryException', NotADirectoryError)
+        cls(u'java.io.FileNotFoundException',       FileNotFoundError)
+        cls(u'java.io.InterruptedIOException',      TimeoutError) # or possibly InterruptedError?
+    ELSE:
+        import socket
+        cls(u'java.lang.SecurityException',         IOError)
+        cls(u'java.net.SocketException',            socket.error)
+        cls(u'java.net.SocketTimeoutException',     socket.timeout)
+    IF PY_VERSION >= PY_VERSION_3_5:
+        cls(u'java.lang.StackOverflowError',        RecursionError)
+    ELSE:
+        cls(u'java.lang.StackOverflowError',        RuntimeError)
+
     # NameError
     cls(u'java.lang.NoClassDefFoundError',    NameError)
     cls(u'java.lang.ClassNotFoundException',  NameError)
     cls(u'java.lang.TypeNotPresentException', NameError)
     # AttributeError
     cls(u'java.lang.IllegalAccessException',  AttributeError)
-    cls(u'java.lang.NoSuchFieldError',        AttributeError)
-    cls(u'java.lang.NoSuchMethodError',       AttributeError)
+    cls(u'java.lang.NoSuchFieldException',    AttributeError)
+    cls(u'java.lang.NoSuchMethodException',   AttributeError)
     # ValueError
     cls(u'java.lang.EnumConstantNotPresentException', ValueError)
     cls(u'java.lang.NullPointerException',            ValueError)
+    cls(u'java.util.InputMismatchException',          ValueError)
+    cls(u'java.text.ParseException',                  ValueError)
     # TypeError
     cls(u'java.lang.ArrayStoreException',                  TypeError)
     cls(u'java.lang.ClassCastException',                   TypeError)
@@ -793,7 +870,18 @@ cdef int init_objects(JEnv env) except -1:
     cls(u'java.io.UTFDataFormatException',            UnicodeError)
     cls(u'java.io.UnsupportedEncodingException',      UnicodeError)
     cls(u'java.io.CharConversionException',           UnicodeError)
+    # RuntimeError
+    cls(u'java.util.ConcurrentModificationException', RuntimeError)
 
+    # Other candidates:
+    #IF PY_VERSION >= PY_VERSION_3:
+    #    import threading
+    #    cls(u'java.util.concurrent.BrokenBarrierException', threading.BrokenBarrierError)
+    #IF PY_VERSION >= PY_VERSION_3_2:
+    #    import concurrent.futures
+    #    cls(u'java.util.concurrent.CancellationException', concurrent.futures.CanceledError)
+    #    cls(u'java.util.concurrent.TimeoutException', concurrent.futures.TimeoutError)
+    
     return 0
 
 cdef int dealloc_objects(JEnv env) except -1:
