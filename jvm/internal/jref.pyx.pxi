@@ -432,13 +432,15 @@ cdef void init_ThrowableDef(JNIEnv* env) nogil:
     ThrowableDef.clazz = <jclass>NewGlobalRef(env, C)
     ThrowableDef.getLocalizedMessage = GetMethodID(env, C, b'getLocalizedMessage', b'()Ljava/lang/String;')
     ThrowableDef.getStackTrace       = GetMethodID(env, C, b'getStackTrace', b'()[Ljava/lang/StackTraceElement;')
+    ThrowableDef.getCause            = GetMethodID(env, C, b'getCause', b'()Ljava/lang/Throwable;')
     DeleteLocalRef(env, C)
 cdef void dealloc_ThrowableDef(JNIEnv* env) nogil:
     if ThrowableDef.clazz is not NULL: DeleteGlobalRef(env, ThrowableDef.clazz)
     ThrowableDef.clazz               = NULL
     ThrowableDef.getLocalizedMessage = NULL
     ThrowableDef.getStackTrace       = NULL
-
+    ThrowableDef.getCause            = NULL
+    
 cdef int init_def(JEnv env) except -1:
     with nogil:
         init_ObjectDef     (env.env)

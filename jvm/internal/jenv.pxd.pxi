@@ -72,6 +72,7 @@ cdef class JEnv(object):
     cdef inline JEnv wrap(JNIEnv* _env):
         cdef JEnv env = JEnv()
         env.env = _env
+        if not jvm.is_attached(): jvm.tls.env = env
         return env
     
     # Basic Conversion
@@ -119,7 +120,9 @@ cdef class JEnv(object):
         cdef jobject GetModule(self, jclass clazz) except NULL;
 
     # Exceptions - no error checking for any of these functions since they all manipulate the exception state
-    cdef jint Throw(self, jthrowable obj)
+    cdef inline jint Throw(self, jthrowable obj):
+        assert obj is not NULL
+        return self.env[0].Throw(self.env, obj)
     cdef jint ThrowNew(self, jclass clazz, unicode message)
     cdef jthrowable ExceptionOccurred(self)
     cdef void ExceptionDescribe(self)

@@ -126,7 +126,7 @@ cdef struct JThreadDef:
     jmethodID getContextClassLoader, setContextClassLoader
 cdef struct JThrowableDef:
     jclass clazz
-    jmethodID getLocalizedMessage, getStackTrace
+    jmethodID getLocalizedMessage, getStackTrace, getCause
     
 cdef JObjectDef      ObjectDef
 cdef JSystemDef      SystemDef

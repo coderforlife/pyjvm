@@ -30,7 +30,7 @@ Internal classes:
 Internal functions:
     jenv() - gets the current thread's JEnv variable, creating it as necessary
     py2<primitive>(...) - converts a Python object to a specific Java primitive
-    
+
 FUTURE:
     modify traceback of exceptions to show Java information
 """
@@ -99,19 +99,36 @@ cdef class JEnv(object):
         if clazz.name == u'java.lang.String': return self.pystr(<jstring>obj)
         from .objects import create_java_object
         return create_java_object(self, JObject.create(self, obj))
-        
+
     # Checking exceptions
     cdef int __raise_exception(self) except -1:
         """
         Raises the current exception from the JVM as a Python exception. Does not check if these is
         an exception to be raised, just does it.
         """
-        # TODO: remove one or two frames off the bottom of the traceback and then add the Java
-        # stack trace onto it
+        assert self.env[0].ExceptionCheck(self.env)
+        if jvm.action_queue is None: # the JVM has not yet run all of the initializers
+            self.env[0].ExceptionDescribe(self.env)
+            self.env[0].ExceptionClear(self.env)
+            raise SystemError(u'Java exception throw during pyjvm initialization')
+
+        # Get the Java exception
         cdef jthrowable t = self.env[0].ExceptionOccurred(self.env)
-        #self.env[0].ExceptionDescribe(self.env)
         self.env[0].ExceptionClear(self.env)
+
+        # TODO: remove one or two frames off the bottom of the traceback and then add the Java
+        # stack trace onto it, also the traceback is off when re-raise a Python exception
+
+        # Check if the exception is actually a Python exception
         from .objects import create_java_object
+        from .synth import PyException
+        if self.IsAssignableFrom(self.GetObjectClass(t), (<JClass>PyException.__jclass__).clazz):
+            raise create_java_object(self, JObject.create(self, t)).exc
+        cdef jthrowable cause = <jthrowable>self.CallObject(t, ThrowableDef.getCause)
+        if cause is not NULL and self.IsAssignableFrom(self.GetObjectClass(cause), (<JClass>PyException.__jclass__).clazz):
+            raise create_java_object(self, JObject.create(self, cause)).exc
+
+        # Just throw the Java exception
         raise create_java_object(self, JObject.create(self, t))
 
     # Miscellaneous Operations
@@ -133,7 +150,7 @@ cdef class JEnv(object):
     #cdef inline jclass FindClass(self, unicode name) except NULL:
     #cdef inline jclass GetSuperclass(self, jclass clazz) except? NULL:
     #cdef inline bint IsAssignableFrom(self, jclass clazz1, jclass clazz2) except -1:
-    
+
     # Module Operations
     IF JNI_VERSION >= JNI_VERSION_9:
         cdef jobject GetModule(self, jclass clazz) except NULL:
@@ -143,9 +160,7 @@ cdef class JEnv(object):
             return module
 
     # Exceptions - no error checking for any of these functions since they all manipulate the exception state
-    cdef jint Throw(self, jthrowable obj):
-        assert obj is not NULL
-        return self.env[0].Throw(self.env, obj)
+    #cdef inline jint Throw(self, jthrowable obj):
     cdef jint ThrowNew(self, jclass clazz, unicode message):
         assert clazz is not NULL and message is not None
         return self.env[0].ThrowNew(self.env, clazz, to_utf8j(message))
