@@ -17,25 +17,28 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 ---------------------------------------------------------------------------------------------------
 
-Version Information Defines
+Version Information Definitions
 """
 
 DEF JNI_VERSION_1_1=0x00010001
 DEF JNI_VERSION_1_2=0x00010002
 DEF JNI_VERSION_1_4=0x00010004
 DEF JNI_VERSION_1_6=0x00010006
+DEF JNI_VERSION_9=0x00090000    # numbering scheme changed...
 
 DEF PY_VERSION_2=0x02000000
-#DEF PY_VERSION_2_7=0x02070000
+DEF PY_VERSION_2_7=0x02070000
 DEF PY_VERSION_3=0x03000000
+DEF PY_VERSION_3_0=0x03000000
 DEF PY_VERSION_3_2=0x03020000
 DEF PY_VERSION_3_3=0x03030000
+DEF PY_VERSION_3_4=0x03040000
 DEF PY_VERSION_3_5=0x03050000
 
 # Target Java SE 6 - pretty old already and it does help
 # The code requires at least JNI_VERSION_1_2. If lowered to JNI_VERSION_1_4 a fallback for deleting
 # references is provided, although it might be slower. If lowered to JNI_VERSION_1_2 native
-# ByteBuffers can no longer be used.
+# ByteBuffers can no longer be used. JNI 9 adds the GetModule function.
 DEF JNI_VERSION=JNI_VERSION_1_6
 
 include "config.pxi" # the current version information
