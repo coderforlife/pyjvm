@@ -601,6 +601,7 @@ cdef class JClass(object):
         val.l = clazz
         c.identity = env[0].CallStaticIntMethodA(env, SystemDef.clazz, SystemDef.identityHashCode, &val)
         c.name = name
+        c.simple_name = name
         c.type = CT_PRIMITIVE
         #c.mode = 0
         #c.is_synthetic = False

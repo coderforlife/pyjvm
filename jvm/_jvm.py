@@ -48,7 +48,7 @@ def start(*opts):
         headless  = boolean
 
     Otherwise, options that can be given to the Java command line can be given. Note that if the
-    classpath is done manually, the separator between paths must os.pathsep and -cp or -classpath
+    classpath is done manually, the separator between paths must be os.pathsep and -cp or -classpath
     cannot be used. Additionally, the -client and -server options may not be honored, especially if
     the JVM was previously started with a different option in the same process.
 
@@ -61,18 +61,34 @@ def start(*opts):
       Enable assertions: -enableassertions
       Extra JNI checks:  -Xcheck:jni
     """
-    
+    from os import pathsep
+    opts = list(opts)
+    classpath,max_heap,headless,prefer = __start_parse_opts(opts)
+
+    if isinstance(classpath, bytes):
+        classpath = unicode(classpath)
+    elif classpath is None:
+        classpath = ''
+    elif not isinstance(classpath, unicode):
+        classpath = pathsep.join(classpath)
+    if classpath != '': __class_paths.extend(classpath.split(pathsep))
+    if len(__class_paths) > 0: opts.append('-Djava.class.path='+pathsep.join(__class_paths))
+    if max_heap is not None:
+        if max_heap < 2*1024: max_heap = 2*1024 # at least 2 MiB
+        opts.append('-Xmx%dk'%max_heap)
+    if headless: opts.append('-Djava.awt.headless=true')
+    __start_core(prefer, opts)
+
+def __start_parse_opts(opts):
+    import re
+    remove = []
     classpath = None
     max_heap = None
     headless = None
-    
-    import re, os
-    remove = []
     prefer = None
-    opts = list(opts)
-    hdlss = re.compile('^-Djava.awt.headless=([tT]rue|[fF]alse)')
-    xmx = re.compile('^-Xmx(\d+)([kKmM]|)$')
-    cp = re.compile('^(-cp|-classpath|-Djava.class.path=)')
+    hdlss = re.compile(r'^-Djava.awt.headless=([tT]rue|[fF]alse)')
+    xmx = re.compile(r'^-Xmx(\d+)([kKmM]|)$')
+    cp = re.compile(r'^(-cp|-classpath|-Djava.class.path=)')
     for i,a in enumerate(opts):
         if a in ('-client', '-server'):
             if prefer is not None: raise ValueError('only one of -client and -server can be specified')
@@ -97,30 +113,13 @@ def start(*opts):
         if m is not None:
             if a.startswith('-c'): raise ValueError('Cannot use the -cp or -classpath options')
             if classpath is not None: raise ValueError('classpath option specified more than once')
-            classpath = a[18:],
+            classpath = a[18:]
             remove.append(i)
             continue
         if a == 'vfprinf' or a == 'exit' or a == 'abort':
             raise ValueError('Cannot use the vfprintf, exit, or abort options')
     for i in remove: del opts[i]
-
-    global __class_paths
-    if isinstance(classpath, bytes):
-        classpath = unicode(classpath)
-    elif classpath is None:
-        classpath = ''
-    elif not isinstance(classpath, unicode):
-        classpath = os.pathsep.join(classpath)
-    if len(__class_paths) > 0:
-        if classpath == '': classpath = os.pathsep.join(__class_paths)
-        else: classpath += os.pathsep + os.pathsep.join(__class_paths)
-    __class_paths = classpath.split(os.pathsep)
-    if classpath != '': opts.append('-Djava.class.path='+classpath)
-    if max_heap is not None:
-        if max_heap < 2*1024: max_heap = 2*1024 # at least 2 MiB
-        opts.append('-Xmx%dk'%max_heap)
-    if headless: opts.append('-Djava.awt.headless=true')
-    __start_core(prefer, opts)
+    return classpath,max_heap,headless,prefer
 
 def __start_core(prefer, opts):
     # Load the JVM dynamic library
@@ -153,14 +152,20 @@ def __start_core(prefer, opts):
     import signal
     signal.signal(signal.SIGINT, signal.default_int_handler)
     # TODO: SIGHUP, SIGTERM, SIGQUIT?
-    
+
     # Add the super-module and some imports to the jvm package
     # TODO: the jvm.internal ones should have proxies in the jvm module before this that trigger
     # a _start_if_needed and then are replaced.
-    sys.modules[JavaImporter._mod_super] = JavaPackage('')
-    import jvm.internal, jvm
-    for n,f in _items(jvm.internal.jvm_publicfuncs): setattr(jvm, n, f)
-    
+    sys.modules[_importer.mod_super] = JavaPackage('')
+    import jvm
+    from .internal import publicfuncs, jvm_publicfuncs, get_java_class
+    publicfuncs.update({
+        'boolean':get_java_class('boolean'),'byte':get_java_class('byte'),'char':get_java_class('char'),
+        'short':get_java_class('short'),'int':get_java_class('int'),'long':get_java_class('long'),
+        'float':get_java_class('float'),'double':get_java_class('double'),'void':get_java_class('void'),
+    })
+    for n,f in _items(jvm_publicfuncs): setattr(jvm, n, f)
+
 def _start_if_needed():
     """Starts the JVM only if not already started."""
     # The conditional here is just to skip the common case of definitely started. A more robust
@@ -185,7 +190,6 @@ def stop():
     global __jvm
     __jvm = None
     jvm_destroy()
-    JavaPackage._globalfuncs = None
 
 def add_class_path(path):
     """
@@ -197,14 +201,14 @@ def add_class_path(path):
     path = abspath(path)
     if isinstance(path, bytes): path = unicode(path)
     __class_paths.append(path)
-    if __jvm is not None: 
-        from .internal import add_class_path
-        add_class_path(path)
+    if __jvm is not None:
+        from .internal import add_class_path as acp
+        acp(path)
 
 class JavaImporter(object):
     """A Python meta-importer for finding and loading Java packages"""
 
-    _mod_super = 'J'
+    mod_super = 'J'
     """
     The 'super' module that contains the entire Java namespace. Default is 'J', which means you can
     do the following:
@@ -213,7 +217,7 @@ class JavaImporter(object):
     this value.
     """
 
-    _mod_prefixes = {'java', 'javax'}
+    mod_prefixes = {'java', 'javax'}
     """
     The module prefixes that can load Java packages and classes directly. For example, if this
     contains 'java' (which it does by default), the following can be done:
@@ -226,18 +230,18 @@ class JavaImporter(object):
     """
 
     # Python 2.7-3.3 finder/loader functions
-    def find_module(self, name, package_path=None):
+    def find_module(self, name, _package_path=None):
         if isinstance(name, bytes): name = unicode(name)
         if name in sys.modules or not (self.__is_mod_super(name) or self.__has_mod_prefix(name)): return None
         return self
     def load_module(self, name):
         if isinstance(name, bytes): name = unicode(name)
-        if self.__is_mod_super(name): name = name[len(self._mod_super)+1:]
+        if self.__is_mod_super(name): name = name[len(self.mod_super)+1:]
         elif not self.__has_mod_prefix(name): raise ValueError()
         return JavaPackage(name)
 
     # Python 3.4+ finder/loader functions
-    def find_spec(self, name, package_path=None, target=None):
+    def find_spec(self, name, _package_path=None, _target=None):
         if name in sys.modules or not (self.__is_mod_super(name) or self.__has_mod_prefix(name)): return None
         from importlib.machinery import ModuleSpec
         spec = ModuleSpec(name, self)
@@ -245,19 +249,19 @@ class JavaImporter(object):
         return spec
     def create_module(self, spec):
         name = spec.name
-        if self.__is_mod_super(name): name = name[len(self._mod_super)+1:]
+        if self.__is_mod_super(name): name = name[len(self.mod_super)+1:]
         elif not self.__has_mod_prefix(name): raise ValueError()
         return JavaPackage(name)
     def exec_module(self, mod): pass
-    
+
     # Utilities
-    def __is_mod_super(self, name):   return name == self._mod_super or name.startswith(self._mod_super + '.' )
-    def __has_mod_prefix(self, name): return name in self._mod_prefixes or any(name.startswith(p+'.') for p in self._mod_prefixes)
-    def _add_mod(self, mod):
+    def __is_mod_super(self, name):   return name == self.mod_super or name.startswith(self.mod_super + '.' )
+    def __has_mod_prefix(self, name): return name in self.mod_prefixes or any(name.startswith(p+'.') for p in self.mod_prefixes)
+    def add_mod(self, mod):
         name = mod.__name__
-        if name == '': sys.modules[self._mod_super] = self
+        if name == '': sys.modules[self.mod_super] = self
         else:
-            sys.modules[self._mod_super+'.'+name] = self
+            sys.modules[self.mod_super+'.'+name] = self
             if self.__has_mod_prefix(name): sys.modules[name] = self
 
 _importer = JavaImporter() # singleton instance of class
@@ -275,7 +279,7 @@ def register_module_name(name):
     entries. Call `get_module_names()` to see the registered values.
     """
     if '.' in name or '/' in name or '\\' in name: raise ValueError('Module name cannot contain ./\\')
-    _importer._mod_prefixes.add(name)
+    _importer.mod_prefixes.add(name)
 
 def module_names():
     """
@@ -284,8 +288,8 @@ def module_names():
     for all of Python, be careful when adding entries. Call `register_module_name(name)` to
     register new values.
     """
-    return tuple(_importer._mod_prefixes)
-    
+    return tuple(_importer.mod_prefixes)
+
 import types
 class JavaPackage(types.ModuleType):
     """A Python module that represents a Java Package."""
@@ -296,7 +300,7 @@ class JavaPackage(types.ModuleType):
         self.__builtins__ = __builtins__
         self.__package__ = ''
         self.__jpkg_desc__ = pkg_desc
-        _importer._add_mod(self) # all JavaPackages are automatically added to the system modules
+        _importer.add_mod(self) # all JavaPackages are automatically added to the system modules
         _start_if_needed()
         from .internal import get_pkgs_and_classes
         self.__jpackages__, self.__jclasses__ = get_pkgs_and_classes(name)
@@ -309,7 +313,7 @@ class JavaPackage(types.ModuleType):
         if is_super and name in publicfuncs:
             # A public/global function
             x = publicfuncs[name]
-            x.__module__ = JavaImporter._mod_super
+            x.__module__ = _importer.mod_super
         elif name in self.__jclasses__:
             # A known child class
             n = self.__jclasses__[name]
@@ -337,7 +341,7 @@ class JavaPackage(types.ModuleType):
         self.__dict__[name] = x
         if isinstance(name_orig, bytes): self.__dict__[name_orig] = x
         return x
-    
+
     def __dir__(self):
         c = list(self.__jpackages__) + list(_keys(self.__jclasses__))
         if self.__name__ == '':
@@ -350,7 +354,7 @@ class JavaPackage(types.ModuleType):
         if self.__jpkg_desc__ is None:
             from .internal import get_pkg_desc
             try: self.__jpkg_desc__ = get_pkg_desc(self.__name__)
-            except Exception as ex: pass
+            except Exception: pass
             if self.__jpkg_desc__ is None: self.__jpkg_desc__ = unicode(repr(self))
         return self.__jpkg_desc__
     if is_py2:
