@@ -22,9 +22,20 @@ Synthetic Java Classes
 ----------------------
 Create Java classes dynamically that map to Python.
 
+Public functions:
+    override    decorator for a method that overrides a Java method
+    param       decorator for Java parameters of a method
+    returns     decorator for Java return type of a method
+    throws      decorator for Java throws clause a method
+    extends     decorator for extending/implementing a Java class
+    implements  another name for the extends decorator
+
+Java classes:
+    PythonException     a RuntimeException that wraps Python exceptions in Java
+
 Internal functions:
     synth_class - creates a synthetic Java class
-    
+
 TODO:
     handle default methods
 """
@@ -480,7 +491,7 @@ def conv_types(typ, *typs):
         # Multiple arguments - each must be its own type
         typs = [typ] + list(typs)
     return [get_parameter_sig(t) for t in typs]
-def synth_override(name=None):
+def override(name=None):
     """
     Marks a method as overriding a Java method (including interface methods, abstract methods, and
     concrete methods). By default the name of overridden method will be the same as the method that
@@ -498,7 +509,7 @@ def synth_override(name=None):
         name, m = None, name
         return jvm_override(m)
     return jvm_override
-def synth_param(typ, *typs):
+def param(typ, *typs):
     """
     Adds a parameter type for the method. The argument(s) is the type(s) of the parameter(s).
     May be applied multiple times or multiple arguments may be given at a time. The order of
@@ -509,7 +520,7 @@ def synth_param(typ, *typs):
         m.__pyjvm_meth__['params'] = u''.join(conv_types(typ, typs)) + m.__pyjvm_meth__.get('params', u'')
         return m
     return jvm_param
-def synth_return(typ):
+def returns(typ):
     """
     Adds a return type for the method. The argument is the type of the return. May only be applied
     once. If not applied the method is assumed to have the return type "void".
@@ -520,7 +531,7 @@ def synth_return(typ):
         m.__pyjvm_meth__['return'] = get_parameter_sig(typ)
         return m
     return jvm_return
-def synth_throws(typ, *typs):
+def throws(typ, *typs):
     """
     Adds a throws clause to the method. The argument(s) is the type(s) of exception(s) to be
     thrown. May be applied multiple times or multiple arguments may be given at a time. Order is
@@ -536,7 +547,7 @@ def synth_throws(typ, *typs):
         m.__pyjvm_meth__.setdefault('throws', set()).update(ts)
         return m
     return jvm_throws
-def synth_extends(jc, *jcs):
+def extends(jc, *jcs):
     """
     Extend/implement one or more Java classes/interfaces. If extending a class it must be listed
     first (if the first thing is not a class it is assumed to be extending java.lang.Object). The

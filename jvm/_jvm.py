@@ -31,11 +31,20 @@ import sys
 from ._util import is_py2
 if is_py2:
     def _keys(d): return d.viewkeys()
-    def _items(d): return d.viewitems()
 else:
     unicode = str
     def _keys(d): return d.keys()
-    def _items(d): return d.items()
+
+# The set of functions that should be publicly accessible for the jvm.internal module
+_publicfuncs = {
+    'get_java_class','template','synchronized','unbox','register_converter',
+    'JavaClass','JavaMethods','JavaMethod','JavaConstructor',
+    'override','param','returns','throws','extends','implements',
+
+    'object_array','boolean_array','byte_array','char_array','short_array','int_array','long_array','float_array','double_array',
+}
+# These are publicly accessible primitive types
+_primitives = {'void','boolean','byte','char','short','int','long','float','double'}
 
 __jvm = None
 __class_paths = []
@@ -154,17 +163,10 @@ def __start_core(prefer, opts):
     # TODO: SIGHUP, SIGTERM, SIGQUIT?
 
     # Add the super-module and some imports to the jvm package
-    # TODO: the jvm.internal ones should have proxies in the jvm module before this that trigger
-    # a _start_if_needed and then are replaced.
     sys.modules[_importer.mod_super] = JavaPackage('')
-    import jvm
-    from .internal import publicfuncs, jvm_publicfuncs, get_java_class
-    publicfuncs.update({
-        'boolean':get_java_class('boolean'),'byte':get_java_class('byte'),'char':get_java_class('char'),
-        'short':get_java_class('short'),'int':get_java_class('int'),'long':get_java_class('long'),
-        'float':get_java_class('float'),'double':get_java_class('double'),'void':get_java_class('void'),
-    })
-    for n,f in _items(jvm_publicfuncs): setattr(jvm, n, f)
+    import jvm, jvm.internal # import this module itself so we can modify it...
+    for n in _publicfuncs: setattr(jvm, n, getattr(jvm.internal, n))
+    for n in _primitives: setattr(jvm, n, jvm.internal.get_java_class(n))
 
 def _start_if_needed():
     """Starts the JVM only if not already started."""
@@ -190,6 +192,36 @@ def stop():
     global __jvm
     __jvm = None
     jvm_destroy()
+    for name in _importer.imported: sys.modules.pop(name, None)
+    del _importer.imported[:]
+    _set_proxy_functions()
+
+def _set_proxy_functions():
+    """
+    This adds all of the jvm.internal.publicfuncs functions and jvm.internal.primitives objects as
+    proxy functions/objects in this module that first make sure there is a JVM started and then
+    call the real function.
+    """
+    import jvm # import this module itself so we can modify it...
+    for name in _publicfuncs: setattr(jvm, name, __make_proxy_function(name))
+    for prim in _primitives: setattr(jvm, prim, __make_proxy_prim(prim))
+
+def __make_proxy_function(name):
+    def jvm_proxy(*args):
+        _start_if_needed()
+        import jvm.internal
+        return getattr(jvm.internal, name)(*args)
+    return jvm_proxy
+
+def __make_proxy_prim(prim):
+    # TODO: this shouldn't return a function but something akin to a JavaClass object
+    def jvm_prim_proxy(*args):
+        _start_if_needed()
+        import jvm.internal
+        return getattr(jvm.internal, prim)(*args)
+    return jvm_prim_proxy
+
+_set_proxy_functions()
 
 def add_class_path(path):
     """
@@ -229,6 +261,8 @@ class JavaImporter(object):
     entries to this list.
     """
 
+    imported = []
+
     # Python 2.7-3.3 finder/loader functions
     def find_module(self, name, _package_path=None):
         if isinstance(name, bytes): name = unicode(name)
@@ -259,10 +293,15 @@ class JavaImporter(object):
     def __has_mod_prefix(self, name): return name in self.mod_prefixes or any(name.startswith(p+'.') for p in self.mod_prefixes)
     def add_mod(self, mod):
         name = mod.__name__
-        if name == '': sys.modules[self.mod_super] = self
+        if name == '':
+            sys.modules[self.mod_super] = self
+            self.imported.append(self.mod_super)
         else:
             sys.modules[self.mod_super+'.'+name] = self
-            if self.__has_mod_prefix(name): sys.modules[name] = self
+            self.imported.append(self.mod_super+'.'+name)
+            if self.__has_mod_prefix(name):
+                sys.modules[name] = self
+                self.imported.append(name)
 
 _importer = JavaImporter() # singleton instance of class
 sys.meta_path.append(_importer)
@@ -309,11 +348,15 @@ class JavaPackage(types.ModuleType):
         if isinstance(name, bytes): name = unicode(name)
         is_super = self.__name__ == ''
         full = name if is_super else '.'.join((self.__name__, name))
-        from .internal import get_java_class, get_pkg_desc, publicfuncs
-        if is_super and name in publicfuncs:
+        from .internal import get_java_class, get_pkg_desc
+        if is_super and name in _publicfuncs:
             # A public/global function
-            x = publicfuncs[name]
+            import jvm.internal
+            x = getattr(jvm.internal, name)
             x.__module__ = _importer.mod_super
+        elif is_super and name in _primitives:
+            # A primite type
+            x = get_java_class(name)
         elif name in self.__jclasses__:
             # A known child class
             n = self.__jclasses__[name]
@@ -326,10 +369,10 @@ class JavaPackage(types.ModuleType):
             # A known protected/private child class
             raise AttributeError(name)
         # Some internal Python and IPython attributes that need to be filtered out to not produce errors
-        elif name in ('__loader__', '__pa''th__', '__fi''le__', '__cache__', '__spec__', '__methods__',
-                      '_ipython_display_', '_repr_jpeg_', '_repr_html_', '_repr_svg_', '_repr_png_',
-                      '_repr_javascript_', '_repr_markdown_', '_repr_latex_', '_repr_json_', '_repr_pdf_',
-                      '_getAttributeNames', 'trait_names'):
+        elif name.startswith('__') and name.endswith('__') or name in (
+              '_ipython_display_', '_repr_jpeg_', '_repr_html_', '_repr_svg_', '_repr_png_',
+              '_repr_javascript_', '_repr_markdown_', '_repr_latex_', '_repr_json_', '_repr_pdf_',
+              '_getAttributeNames', 'trait_names'):
             raise AttributeError(name)
         else:
             # An unknown
@@ -345,8 +388,8 @@ class JavaPackage(types.ModuleType):
     def __dir__(self):
         c = list(self.__jpackages__) + list(_keys(self.__jclasses__))
         if self.__name__ == '':
-            from .internal import publicfuncs
-            c.extend(_keys(publicfuncs))
+            c.extend(_publicfuncs)
+            c.extend(_primitives)
         return c
     @property
     def __doc__(self): return unicode(self)
