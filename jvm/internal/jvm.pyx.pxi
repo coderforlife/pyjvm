@@ -408,7 +408,7 @@ cdef int vfprintf_hook(FILE *stream, const char * format, va_list arg) nogil:
             if retval < 0: return retval
     with gil:
         try:
-            out = s
+            out = from_utf8j(s)
             if __vfprintf_begin_line: out = u'JVM: ' + out
             import sys
             if stream == c_stderr: sys.stderr.write(out)
@@ -417,7 +417,7 @@ cdef int vfprintf_hook(FILE *stream, const char * format, va_list arg) nogil:
         except:
             errno = EINVAL
             return -1
-    free(s)
+        finally: free(s)
     return retval
 
 
