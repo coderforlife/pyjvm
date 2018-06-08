@@ -25,8 +25,11 @@ from __future__ import absolute_import
 include "version.pxi"
 
 # For displaying pointers
-cdef unicode __str_ptr = u"%0"+str(sizeof(void*)*2)+u"X"
-cdef inline unicode str_ptr(const void* p): return __str_ptr % (<size_t>p)
+cdef unicode __str_ptr = None
+cdef inline unicode str_ptr(const void* p):
+    global __str_ptr
+    if __str_ptr is None: __str_ptr = u"%0"+str(sizeof(void*)*2)+u"X"
+    return __str_ptr % (<size_t>p)
 
 # Python 2/3 interoperability
 from cpython.unicode cimport PyUnicode_Check, PyUnicode_DecodeASCII
