@@ -77,6 +77,7 @@ from .jni cimport jint, jsize
 #   jcf          1   (jref, no dealloc)
 #   objects      2
 #   p2j          3   (convert)
+#   synth        4
 #   array        5
 #   numbers     10
 #   collections 11
@@ -176,13 +177,13 @@ cdef class JVM(object):
         The JVM-Main thread function. Initializes the JVM, enters an event loop, and eventually
         destroys the JVM when signalled to stop.
         """
-        import threading, sys
+        import threading, time, sys
         self.main_thread = threading.current_thread()
 
         cdef JEnv env = JEnv()
         cdef jsize nVMs
         cdef JavaVMInitArgs args
-        cdef int i, retval
+        cdef int i = 0, retval
         cdef bint daemon
         cdef bytes name, opt
         try:
@@ -217,13 +218,6 @@ cdef class JVM(object):
             # Set the environment
             self.tls = threading.local()
             self.tls.env = env
-
-            # Initialize
-            i = 0
-            while i < __n_init_hooks and __init_hooks_pris[i] < 0: __init_hooks[i](env); i += 1 # early hooks
-            env.check_exc() # check for any exceptions from during early initialization
-            env.init()
-            while i < __n_init_hooks: __init_hooks[i](env); i += 1
             
             # Create the action queue
             IF PY_VERSION < PY_VERSION_3:
@@ -231,18 +225,30 @@ cdef class JVM(object):
             ELSE:
                 from queue import Queue
             self.action_queue = Queue()
+
+            # Initialize
+            while i < __n_init_hooks and __init_hooks_pris[i] < 0: __init_hooks[i](env); i += 1 # early hooks
+            env.check_exc() # check for any exceptions from during early initialization
+            env.init()
+            while i < __n_init_hooks: __init_hooks[i](env); i += 1
         except Exception as ex:
             # Failed to start, save the exception and die
             self.tls = None
             self.main_thread = None
+            self.action_queue = None
+            for i in xrange(i-1, -1, -1):
+                try: __dealloc_hooks[i](env)
+                except Exception as ex: pass
+            if self.jvm is not NULL: self.jvm[0].DestroyJavaVM(self.jvm)
             self.exc = ex
             self.tb = sys.exc_info()[2]
             return
 
-        # Started!
+        # Started! This will release the jvm.start() function
         finally: start_event.set()
         del start_event
-
+        time.sleep(0)
+        
         # Run the action queue (event loop)
         cdef JVMAction action
         while True:
