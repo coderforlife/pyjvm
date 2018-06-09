@@ -178,7 +178,7 @@ class JavaClass(type):
 
         cdef JEnv env = jenv()
         cdef JClass clazz = JClass.named(env, cn)
-        if clazz.declaring_class is None: add_class_to_packages(cn)
+        if clazz.declaring_class is None and not clazz.is_primitive(): add_class_to_packages(cn)
 
         cdef JClass c = clazz, s = clazz.superclass
         name = clazz.simple_name
