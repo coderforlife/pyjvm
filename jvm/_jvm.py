@@ -220,7 +220,7 @@ class __JavaClassProxy(object): # TODO: technically should inherit from type
         from .internal import get_java_class
         return get_java_class(self.__name)
     def __getattr__(self, name): return getattr(self.__get(), name) # only "class" will work
-    def __setattr__(self, name, value): setattr(self.__get(), name, value) # always going to fail
+    #def __setattr__(self, name, value): setattr(self.__get(), name, value) # always going to fail
     def __call__(self, *args, **kwargs): return self.__get()(*args, **kwargs) # always going to fail
     def __getitem__(self, ind): return self.__get()[ind] # only array-based ones will work
     def __dir__(self): return dir(self.__get()) # only "class" will work
