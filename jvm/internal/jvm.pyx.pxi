@@ -428,10 +428,6 @@ cdef int vfprintf_hook(FILE *stream, const char * format, va_list arg) nogil:
 
 
 ########## exit and abort JVM hooks ##########
-# TODO: these "work" but can only use the GIL if the JVM is not being exited due to a non-GIL
-# releasing function, which is the default behavior. A different solution will be needed to allow
-# GIL activities to occur here... it is possible that the vfprintf hook also doesn't work for the
-# same reason.
 cdef void jvm_exit_hook(jint code) nogil:
     pass
 cdef void jvm_abort_hook() nogil:
