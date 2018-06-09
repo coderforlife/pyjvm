@@ -46,7 +46,7 @@ from .jni cimport jobject
 from .core cimport jvm_add_init_hook, jvm_add_dealloc_hook, JClass, JEnv, jenv
 from .objects cimport get_java_class, get_object
 from .convert cimport P2JConvert, P2JQuality, FAIL, reg_conv_cy
-from .arrays cimport JPrimitiveArray, JPrimArrayPointer, get_jpad
+from .arrays cimport JPrimitiveArray, JPrimArrayPointer
 
 
 cdef bigint2long(JEnv env, x):
@@ -59,7 +59,7 @@ cdef long2bigint(JEnv env, x):
         # In Python 2 we need to convert int to long
         if isinstance(x, int): x = long(x)
     cdef Py_ssize_t n = (x.bit_length() + 7) // 8
-    cdef JPrimitiveArray arr = JPrimitiveArray.new_raw(env, get_java_class(u'[B'), n, get_jpad(b'B'))
+    cdef JPrimitiveArray arr = JPrimitiveArray.new(env, n, JClass.named(env, u'byte'))
     cdef JPrimArrayPointer ptr = JPrimArrayPointer(env, arr)
     _PyLong_AsByteArray(<PyLongObject*><PyObject*>x, <unsigned char*>ptr.ptr, n, False, True)
     ptr.release()

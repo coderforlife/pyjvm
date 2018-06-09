@@ -37,11 +37,15 @@ cdef class JArray(object):
 
 cdef struct JPrimArrayDef
 cdef JPrimArrayDef* get_jpad(char sig) except NULL
+cdef unicode get_arr_classname(JClass elemClass, int dim=*)
 
 cdef class JPrimitiveArray(JArray):
     cdef JPrimArrayDef* p
     """The primitive array definitions for this array."""
 
+    @staticmethod
+    cdef JPrimitiveArray new(JEnv env, Py_ssize_t length, JClass elemClass)
+    
     @staticmethod
     cdef JPrimitiveArray new_raw(JEnv env, object cls, Py_ssize_t length, JPrimArrayDef* p)
 
@@ -73,8 +77,6 @@ cdef class JPrimArrayPointer(object):
 
 cdef class JObjectArray(JArray):
     @staticmethod
-    cdef unicode get_objarr_classname(JClass elemClass, int dim=*)
-    @staticmethod
-    cdef JObjectArray new_raw(JEnv env, Py_ssize_t length, JClass elementClass, jobject init=*, int dim=*)
+    cdef JObjectArray new(JEnv env, Py_ssize_t length, JClass elementClass, jobject init=*, int dim=*)
     @staticmethod
     cdef JObjectArray create(object args, JClass elementClass)

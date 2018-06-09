@@ -41,7 +41,7 @@ Provides the conversions:
     bytearray   -> byte[]
     array.array -> primitive array
     buffer/memoryview -> primitive array
-    
+
 FUTURE:
     support critical array access
     support buffer protocol (consumer and exporter) for multi-dimensional primitive arrays
@@ -94,7 +94,7 @@ ELSE:
         cdef int PyUnicode_KIND(object)
         cdef void* PyUnicode_DATA(object)
 
-        
+
 from cpython.array cimport array
 cdef extern from *:
     array newarrayobject(type type, Py_ssize_t size, void *descr)
@@ -168,8 +168,8 @@ cdef inline int arraycopy(JEnv env, jarray src, jint srcPos, jarray dest, jint d
     val[0].l = src; val[1].i = srcPos; val[2].l = src; val[3].i = destPos; val[4].i = length
     env.CallStaticVoidMethod(SystemDef.clazz, SystemDef.arraycopy, val, withgil(length*16))
     return 0
-    
-    
+
+
 ########## Primitive Types Python Correlates ##########
 cdef bytes buffer_formats_bool = b'?'
 cdef bytes buffer_formats_char = b'cuw'
@@ -465,6 +465,12 @@ cdef JPrimArrayDef* get_jpad(char sig) except NULL:
     if sig == b'D': return &jpad_double
     raise ValueError()
 
+cdef unicode get_arr_classname(JClass elemClass, int dim=1):
+    assert dim >= 1
+    if elemClass.is_primitive(): return (u'['*dim) + unichr(elemClass.funcs.sig)
+    elif elemClass.is_array():   return (u'['*dim) + elemClass.name
+    else:                        return u'%sL%s;' % ((u'['*dim), elemClass.name)
+
 
 ########## Primitive Array Iterator Wrapper ##########
 cdef class JPrimArrayIter(object):
@@ -612,6 +618,15 @@ cdef class JPrimitiveArray(JArray):
     """
 
     @staticmethod
+    cdef JPrimitiveArray new(JEnv env, Py_ssize_t length, JClass elemClass):
+        """
+        Creates a new Java array of the given length and element class. The array is filled with
+        0s/Falses.
+        """
+        return JPrimitiveArray.new_raw(env, get_java_class(get_arr_classname(elemClass)),
+                                       length, get_jpad(elemClass.funcs.sig))
+
+    @staticmethod
     cdef JPrimitiveArray new_raw(JEnv env, object cls, Py_ssize_t length, JPrimArrayDef* p):
         """
         Creates a new Java array of the given class, length, and definitions. `cls` must be a
@@ -695,7 +710,7 @@ cdef class JPrimitiveArray(JArray):
                 arr = JPrimitiveArray.new_raw(env, cls, <jsize>(n+addl), p)
                 copy_uni_to_char_array(arg, 0, n, arr, 0)
                 return arr
-            
+
             # array.array
             if check_arrayarray(arg, p):
                 n = (len(arg) // p.itemsize) if arg.itemsize == 1 else len(arg)
@@ -870,7 +885,7 @@ cdef class JPrimitiveArray(JArray):
         i,j = check_slice(start, stop, 1, self.length)
         n = j-i
         if n == 0: return
-        
+
         from collections import Iterable, Sized
 
         # Copy data to this array
@@ -961,7 +976,7 @@ cdef class JPrimitiveArray(JArray):
         if j < 0: j += self.length
         if i > j: raise IndexError(u'%d > %d' % (i,j))
         cdef JEnv env = jenv()
-        cdef JPrimitiveArray arr = JPrimitiveArray.new_raw(type(self), env, j-i, self.p)
+        cdef JPrimitiveArray arr = JPrimitiveArray.new_raw(env, type(self), j-i, self.p)
         cdef JPrimArrayPointer ptr = JPrimArrayPointer(env, self)
         if j > self.length: j = self.length
         self.p.set(env, arr.arr, 0, <jsize>(j-i), (<char*>ptr.ptr) + i*self.p.itemsize)
@@ -1174,22 +1189,16 @@ cdef inline unicode primarr_str(JPrimitiveArray arr):
 ##################################
 cdef class JObjectArray(JArray):
     @staticmethod
-    cdef unicode get_objarr_classname(JClass elemClass, int dim=1):
-        assert dim >= 1 and not elemClass.is_primitive()
-        brackets = u'[' * dim
-        return (brackets + elemClass.name) if elemClass.is_array() else (u'%sL%s;' % (brackets, elemClass.name))
-
-    @staticmethod
-    cdef JObjectArray new_raw(JEnv env, Py_ssize_t length, JClass elementClass, jobject init=NULL, int dim=1):
+    cdef JObjectArray new(JEnv env, Py_ssize_t length, JClass elementClass, jobject init=NULL, int dim=1):
         """
         Creates a new Java object array that has `length` elements, contains subclasses of
         `elementClass`, with each element set to `init` (default is filled with null).
         """
         if sizeof(Py_ssize_t) > sizeof(jsize) and length > 0x7FFFFFFF: raise OverflowError()
-        cdef unicode cn = JObjectArray.get_objarr_classname(elementClass, dim)
+        cdef unicode cn = get_arr_classname(elementClass, dim)
         cdef cls = get_java_class(cn) # a subclass of JObjectArray/java.lang.Object
         if dim > 1:
-            elementClass = JClass.named(env, JObjectArray.get_objarr_classname(elementClass, dim-1))
+            elementClass = JClass.named(env, get_arr_classname(elementClass, dim-1))
         cdef jobjectArray jarr = env.NewObjectArray(<jsize>length, elementClass.clazz, init)
         cdef JObjectArray arr = cls.__new__(cls, JObject.create(env, jarr))
         return arr
@@ -1207,7 +1216,7 @@ cdef class JObjectArray(JArray):
         cdef jvalue val[3]
 
         # No arguments -> empty array
-        if len(args) == 0: return JObjectArray.new_raw(env, 0, elementClass)
+        if len(args) == 0: return JObjectArray.new(env, 0, elementClass)
 
         if len(args) == 1:
             arg = args[0]
@@ -1223,13 +1232,13 @@ cdef class JObjectArray(JArray):
             except TypeError: pass
             else:
                 if n < 0: raise ValueError(u'Cannot create negative sized array')
-                return JObjectArray.new_raw(env, n, elementClass)
+                return JObjectArray.new(env, n, elementClass)
 
             # Sequence -> forward to having more than 1 argument
             from collections import Iterable, Sized
             if isinstance(arg, Iterable) and isinstance(arg, Sized): args = arg
         # Go through sequence and convert each argument
-        cdef JObjectArray joa = JObjectArray.new_raw(env, len(args), elementClass)
+        cdef JObjectArray joa = JObjectArray.new(env, len(args), elementClass)
         cdef jobjectArray arr = <jobjectArray>joa.arr
         cdef jobject obj
         for i,a in enumerate(args):
@@ -1456,8 +1465,8 @@ cdef class JObjectArray(JArray):
     def hashCode(self, bint deep=True): return objarr_hash(self.arr, self.length, deep)
     def __richcmp__(self, other, int op):
         if op != 2 and op != 3 or not isinstance(other, JObjectArray): return NotImplemented
-        cdef JObjectArray o = other
-        eq = objarr_eqls(self.arr, self.length, o.arr, o.length, True)
+        cdef JObjectArray s = self, o = other
+        eq = objarr_eqls(s.arr, s.length, o.arr, o.length, True)
         return eq if op == 2 else not eq
     def equals(self, other, bint deep=True):
         if not isinstance(other, JObjectArray): raise ValueError(u'Can only compare two object arrays')
@@ -1613,7 +1622,7 @@ def object_array (*args, type=None):
     if type is None: type = get_java_class(u'java.lang.Object')
     return JObjectArray.create(args, type.__jclass__)
 
-    
+
 ########## Conversion Functions ##########
 cdef jobject __p2j_conv_bytes(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(byte_array(x)))
 cdef jobject __p2j_conv_bytearray(JEnv env, object x) except? NULL: return env.NewLocalRef(get_object(byte_array(x)))
@@ -1691,7 +1700,7 @@ cdef P2JConvert p2j_check_buffer(JEnv env, object x, JClass p, P2JQuality* q):
     PyBuffer_Release(&buf)
     return _p2j_array_conv(jpad)
 
-    
+
 ########## Initialization of Array Definitions and Conversions ##########
 cdef int init_array(JEnv env) except -1:
     # java.util.Arrays utility class
@@ -1735,7 +1744,7 @@ cdef int init_array(JEnv env) except -1:
         <GetPrimArrayRegion>JEnv.GetDoubleArrayRegion, <SetPrimArrayRegion>JEnv.SetDoubleArrayRegion)
     jpads[0] = &jpad_boolean; jpads[1] = &jpad_byte; jpads[2] = &jpad_char; jpads[3] = &jpad_short
     jpads[4] = &jpad_int; jpads[5] = &jpad_long; jpads[6] = &jpad_float; jpads[7] = &jpad_double
-        
+
     # Object array utilities
     ObjectArrayDef.copyOf         = env.GetStaticMethodID(Arrays, u'copyOf', u'([Ljava/lang/Object;I)[Ljava/lang/Object;')
     ObjectArrayDef.copyOf_nt      = env.GetStaticMethodID(Arrays, u'copyOf', u'([Ljava/lang/Object;ILjava/lang/Class;)[Ljava/lang/Object;')
@@ -1805,7 +1814,7 @@ cdef int init_array(JEnv env) except -1:
     from collections import MutableSequence
     MutableSequence.register(JPrimitiveArray)
     MutableSequence.register(JObjectArray)
-    
+
     # Add converters
     global p2j_conv_bytes, p2j_conv_bytearray
     global p2j_conv_boolean_array, p2j_conv_byte_array, p2j_conv_char_array, p2j_conv_short_array
@@ -1819,7 +1828,7 @@ cdef int init_array(JEnv env) except -1:
     p2j_conv_int_array     = P2JConvert.create_cy(__p2j_conv_int_array)
     p2j_conv_long_array    = P2JConvert.create_cy(__p2j_conv_long_array)
     p2j_conv_float_array   = P2JConvert.create_cy(__p2j_conv_float_array)
-    p2j_conv_double_array  = P2JConvert.create_cy(__p2j_conv_double_array)    
+    p2j_conv_double_array  = P2JConvert.create_cy(__p2j_conv_double_array)
     reg_conv_cy(env, unicode,     u'[C', p2j_check_chararr)
     reg_conv_cy(env, bytes,       u'[B', p2j_check_bytes)
     reg_conv_cy(env, bytearray,   u'[B', p2j_check_bytearray)
@@ -1828,7 +1837,7 @@ cdef int init_array(JEnv env) except -1:
     #    reg_conv_cy(env, bytearray, u'java.nio.ByteBuffer', p2j_check_bytes2bbuf)
     reg_conv_cy(env, array.array, None, p2j_check_array)
     reg_conv_cy(env, None,        None, p2j_check_buffer)
-   
+
 cdef int dealloc_array(JEnv env) except -1:
     global Arrays
     if Arrays is not NULL: env.DeleteGlobalRef(Arrays)

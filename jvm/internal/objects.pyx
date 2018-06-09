@@ -40,7 +40,7 @@ Internal functions:
     get_class          - gets the jclass from a JavaClass
     get_object         - gets the jobject from a Python object
     java_id            - gets the identity of a Java object
-    
+
 TODO:
     inner classes automatically know the outer class instance and incorporate it into the constructor
 """
@@ -56,6 +56,7 @@ from cpython.tuple  cimport PyTuple_Check
 from cpython.unicode cimport PyUnicode_AsUTF8String
 
 from .utils cimport to_unicode, KEYS
+from .unicode cimport unichr
 
 from .jni cimport jclass, jobject, jfieldID, jvalue, jstring, jint
 
@@ -63,7 +64,7 @@ from .core cimport JClass, JObject, JMethod, JField, JEnv, jenv, SystemDef, Obje
 from .core cimport jvm_add_init_hook, jvm_add_dealloc_hook
 from .convert cimport P2JQuality, FAIL, P2JConvert, p2j_lookup, p2j_prim_lookup, p2j_obj_lookup
 from .convert cimport select_method, conv_method_args, conv_method_args_single, free_method_args
-from .arrays cimport JObjectArray
+from .arrays cimport JObjectArray, JPrimitiveArray, get_arr_classname
 from .packages cimport add_class_to_packages
 
 cdef dict classes = None # class-name (using . and without L;) -> JavaClass
@@ -85,10 +86,10 @@ cpdef create_java_object(JEnv env, JObject _obj):
     if self_fid is not NULL:
         self_id = env.GetLongField(obj, self_fid)
         if self_id != 0: return java_objects[self_id]
-    
+
     # Get the Java class
     cls = get_java_class(clazz.name)
-    
+
     # Check if this is an inner class
     if clazz.is_member() and not clazz.is_static() and clazz.declaring_class is not None:
         fid = env.GetFieldID_(clazz.clazz, u'this$0', clazz.declaring_class.sig())
@@ -104,11 +105,11 @@ cpdef create_java_object(JEnv env, JObject _obj):
         env.check_exc()
 
     return py_obj
-    
+
 cdef inline new_java_object(JEnv env, jclass clazz, JMethod m, jvalue* jargs, bint withgil):
     try: return create_java_object(env, JObject.create(env, env.NewObject(clazz, m.id, jargs, withgil)))
     finally: free_method_args(env, m, jargs)
-    
+
 cdef inline index_or_slice(ind):
     """
     Checks if a value given to __getitem__ is an index (returing an integer) or empty slice
@@ -124,18 +125,19 @@ cdef inline index_or_slice(ind):
             raise ValueError(u'Slice can only be an empty slice')
         return ind
     return None
-    
+
 cdef create_java_array(JEnv env, JClass elemClass, list lengths, Py_ssize_t dim=0):
     """
     Create a multi-dimensional array recursively, trailing dimensions that are slice objects are
     not filled in.
     """
-    arr = JObjectArray.new_raw(env, lengths[dim], elemClass, NULL, len(lengths)-dim)
+    arr = (JPrimitiveArray.new(env, lengths[dim], elemClass) if elemClass.is_primitive() and dim+1 == len(lengths) else
+           JObjectArray.new(env, lengths[dim], elemClass, NULL, len(lengths)-dim))
     if dim != len(lengths) - 1 and not PySlice_Check(lengths[dim+1]):
         for i in xrange(lengths[dim]):
             arr[i] = create_java_array(env, elemClass, lengths, dim+1)
     return arr
-    
+
 def template(class_name, *bases):
     """Makes the decorated class a Java Class template with the given class name."""
     # Mostly inspired from six.add_metaclass
@@ -173,14 +175,14 @@ class JavaClass(type):
         cdef unicode cn = to_unicode(attr['__java_class_name__'])
         del attr['__java_class_name__']
         if cn in classes: raise TypeError(u"Class '%s' is already defined"%cn)
-        
+
         cdef JEnv env = jenv()
         cdef JClass clazz = JClass.named(env, cn)
         if clazz.declaring_class is None: add_class_to_packages(cn)
 
         cdef JClass c = clazz, s = clazz.superclass
         name = clazz.simple_name
-        
+
         attr['__jclass__'] = clazz
         attr['__module__'] = clazz.package_name
         cdef list qual_names = []
@@ -208,7 +210,7 @@ class JavaClass(type):
             if is_objarr: new_bases.append(JObjectArray)
             new_bases.append(get_java_class(s.name))
         for c in interfaces: new_bases.append(get_java_class(c.name))
-        
+
         IF PY_VERSION < PY_VERSION_3: name = PyUnicode_AsUTF8String(name)
         if len(new_bases) > 1 and object in new_bases: new_bases.remove(object)
         obj = type.__new__(cls, name, tuple(new_bases), attr)
@@ -218,10 +220,15 @@ class JavaClass(type):
         """
         Get a static Java 'attribute' - either a field value, nested classes, or a JavaMethods. The
         member must be on this class and not a superclass or interface since static members do not
-        inherit.
+        inherit. Also works for the special "class" attribute which gets a java.lang.Class object.
+        This special attribute must be accessed with getattr() since class is a keyword in Python.
         """
         cdef JClass clazz = self.__jclass__
         cdef unicode name = to_unicode(_name)
+        cdef JEnv env
+        if name == u'class':
+            env = jenv()
+            return create_java_object(env, JObject.wrap(env.NewGlobalRef(clazz.clazz)))
         if name in clazz.static_methods:
             return JavaStaticMethods(self, name)
         elif name in clazz.static_classes:
@@ -233,7 +240,7 @@ class JavaClass(type):
         """Set a static Java field value for this class"""
         cdef JClass clazz = self.__jclass__
         cdef unicode name = to_unicode(_name)
-        if name not in clazz.static_fields: raise AttributeError(name)
+        if name == u'class' or name not in clazz.static_fields: raise AttributeError(name)
         cdef JField field = clazz.static_fields[name]
         if field.is_final(): raise AttributeError(u"Can't set final static field")
         field.type.funcs.set_static(jenv(), clazz.clazz, field, value)
@@ -245,9 +252,11 @@ class JavaClass(type):
         """
         cdef JClass clazz = self.__jclass__
         if clazz.is_interface(): raise TypeError(u'Cannot instantiate interfaces')
-        if clazz.is_abstract(): raise TypeError(u'Cannot instantiate abstract classes')
+        if clazz.is_abstract() and not clazz.is_array(): raise TypeError(u'Cannot instantiate abstract classes')
         if hasattr(self, '__self__'): args = (self.__self__,) + tuple(args)
         cdef JEnv env = jenv()
+        if clazz.is_array():
+            pass # TODO: call *_array with the arguments/type
         cdef jvalue* jargs
         cdef JMethod m = conv_method_args(env, clazz.constructors, args, &jargs)
         return new_java_object(env, clazz.clazz, m, jargs, withgil)
@@ -258,7 +267,7 @@ class JavaClass(type):
                 create an array with the length of `x` and the component type of `class` filled
                 with nulls
                 e.g.   arr = java.lang.Object[5]
-                
+
             colon:
                 get the class of the array with the component type of `class`
                 e.g.   clazz = java.lang.Object[:]
@@ -268,7 +277,7 @@ class JavaClass(type):
                 or, if using :, then the class for the multi-dimensional array
                 e.g.   clazz = java.lang.Object[:,:]
                        arr = java.lang.Object[2,3]
-                
+
             ellipsis:
                 get all signatures of constructors for `class`
                 e.g.   for sig in java.lang.Object[...]: print(sig)
@@ -280,8 +289,10 @@ class JavaClass(type):
         """
         cdef JClass clazz = self.__jclass__
         x = index_or_slice(ind)
-        if PySlice_Check(x): return get_java_class(JObjectArray.get_objarr_classname(clazz))
-        elif x is not None:  return JObjectArray.new_raw(jenv(), x, clazz)
+        if PySlice_Check(x): return get_java_class(get_arr_classname(clazz))
+        elif x is not None:
+            return (JPrimitiveArray.new(jenv(), x, clazz) if clazz.is_primitive() else
+                    JObjectArray.new(jenv(), x, clazz))
         if PyTuple_Check(ind):
             if len(ind) == 0: raise ValueError(u'Cannot create 0-dimensional arrays')
             ind = [index_or_slice(x) for x in ind]
@@ -293,8 +304,7 @@ class JavaClass(type):
                 if PySlice_Check(x): has_slice = True
                 elif has_slice: raise ValueError(u'Slices must be at the end')
             # Give back class if all slices
-            if has_slice and PySlice_Check(ind[0]):
-                return get_java_class(JObjectArray.get_objarr_classname(clazz, len(ind)))
+            if has_slice and PySlice_Check(ind[0]): return get_java_class(get_arr_classname(clazz, len(ind)))
             # Create the array
             return create_java_array(jenv(), clazz, ind)
         if clazz.is_interface(): raise TypeError(u'Cannot instantiate interfaces')
@@ -315,9 +325,9 @@ class JavaClass(type):
         cdef JMethod m
         for m in clazz.constructors: yield JavaConstructor(self, m, getattr(self, '__self__', None))
     def __dir__(self):
-        """Lists all static members of the class."""
+        """Lists all static members of the class including the special 'class'."""
         cdef JClass c = self.__jclass__
-        return list(KEYS(c.static_fields)) + list(KEYS(c.static_methods)) + list(KEYS(c.static_classes))
+        return ['class'] + list(KEYS(c.static_fields)) + list(KEYS(c.static_methods)) + list(KEYS(c.static_classes))
     IF PY_VERSION < PY_VERSION_3:
         def __unicode__(self): return repr(self)
         def __str__(self): return PyUnicode_AsUTF8String(repr(self))
@@ -355,7 +365,7 @@ class JavaClass(type):
     def __instancecheck__(cls, inst):
         # This only helps include bound inner classes properly, otherwise it is not necessary
         return any(cls.__subclasscheck__(c) for c in {type(inst), inst.__class__})
-        
+
 cdef class JavaMethods(object):
     """
     Collection of Java methods for an object. This object can be called in which case the method
@@ -501,12 +511,12 @@ from contextlib import contextmanager
 def synchronized(obj):
     """
     Enter a synchronized block for a Java object. This is to be used as:
-    
+
         with synchronized(obj):
             ...
-        
+
     Which is equivilent to the Java code:
-    
+
         synchronized(obj) {
             ...
         }
@@ -796,7 +806,7 @@ cdef int init_objects(JEnv env) except -1:
         #            ste._jcall0(u'getFileName'),
         #            ste._jcall0(u'getLineNumber'),
         #            ste._jcall0(u'getClassName') + '.' + ste._jcall0(u'getMethodName'),
-        #    return 
+        #    return
         IF PY_VERSION < PY_VERSION_3:
             def __unicode__(self): return self._jcall0(u'getLocalizedMessage')
             def __str__(self): return PyUnicode_AsUTF8String(self._jcall0(u'getLocalizedMessage'))
@@ -881,7 +891,7 @@ cdef int init_objects(JEnv env) except -1:
     #    import concurrent.futures
     #    cls(u'java.util.concurrent.CancellationException', concurrent.futures.CanceledError)
     #    cls(u'java.util.concurrent.TimeoutException', concurrent.futures.TimeoutError)
-    
+
     return 0
 
 cdef int dealloc_objects(JEnv env) except -1:
