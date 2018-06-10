@@ -51,9 +51,10 @@ from .unicode cimport to_utf8j, unichr
 from .jni cimport jclass, jfieldID, jobject, jthrowable, jvalue, jint, JNIEnv, JNINativeMethod
 
 from .core cimport JObject, JClass, JMethod, JField, JEnv, jenv, ClassLoaderDef, ThrowableDef, class_exists, unregister_natives
+from .core cimport jvm_add_init_hook, jvm_add_dealloc_hook, JVMAction
 from .core cimport Modifiers, PUBLIC, PRIVATE, PROTECTED, STATIC, FINAL, SUPER, NATIVE, ABSTRACT, SYNTHETIC
 from .core cimport py2boolean, py2byte, py2char, py2short, py2int, py2long, py2float, py2double
-from .objects cimport create_java_object, get_object_class, get_object
+from .objects cimport create_java_object, get_object_class, get_java_class, get_object
 from .convert cimport object2py, py2object, get_parameter_sig
 
 from io import BytesIO
@@ -70,7 +71,7 @@ ELSE:
 
 cdef class ConstantPool(object):
     cdef object data
-    cdef uint16_t count 
+    cdef uint16_t count
     cdef dict pool # bytes -> id
 
     def __cinit__(self):
@@ -224,9 +225,6 @@ cdef class MethodInfo(object):
     cdef inline MethodInfo create(JMethod method):
         return MethodInfo(method.modifiers, method.name, method.sig(), method.exc_types)
 
-cdef inline bint is_throwable(JEnv env, jclass clazz):
-    return env.env[0].IsAssignableFrom(env.env, clazz, ThrowableDef.clazz)
-
 cdef inline int all_methods(list classes, dict abstract, dict concrete) except -1: # [JClass], {(name,param_sig):MethodInfo}
     cdef JClass cls
     for cls in classes: all_methods_1(cls, abstract, concrete)
@@ -267,6 +265,37 @@ cdef inline break_param_sig(unicode ps):
         ps = ps[i:]
     return param_sigs
 
+cdef list exc_map = None
+cdef object PyException = None
+
+cdef inline get_py_exc_msg(exc):
+    msg = str(exc)
+    return exc.__class__.__name__ + ('' if msg is None or len(msg) == 0 else (': ' + msg))
+
+cdef inline bint is_throwable(JEnv env, jclass clazz):
+    return env.env[0].IsAssignableFrom(env.env, clazz, ThrowableDef.clazz)
+
+cdef wrap_exc(py_exc, tb=None):
+    #if PyException is None:
+    #    # This should only occur if there is an error very rapidly after the JVM is started
+    #    import sys, traceback
+    #    sys.stderr.write("Unable to transport Python exception through Java")
+    #    traceback.print_exception(type(py_exc), py_exc, tb or getattr(py_exc, '__traceback__', None))
+    #    return get_java_class(u'java.lang.RuntimeException')(get_py_exc_msg(py_exc))
+        
+    # Create the Java PythonException object
+    jp_exc = PyException.create(py_exc, tb)
+    for py_exc_typ,j_exc_typ in exc_map:
+        if isinstance(py_exc, py_exc_typ):
+            # Wrapped with another Java exception
+            j_exc_typ = get_java_class(j_exc_typ)
+            try: return j_exc_typ['Ljava.lang.String;Ljava.lang.Throwable;'](get_py_exc_msg(py_exc))
+            except KeyError:
+                j_exc = j_exc_typ['Ljava.lang.String;'](get_py_exc_msg(py_exc))
+                j_exc._jcall1obj(u'initCause', jp_exc)
+                return j_exc
+    return jp_exc
+
 cdef dict java2ctypes = {
     u'L': ctypes.c_void_p, u'[': ctypes.c_void_p, u'V': None,
     u'Z': ctypes.c_bool,   u'C': ctypes.c_uint16,
@@ -287,7 +316,7 @@ cdef void* create_bridge(JEnv env, method, unicode sig) except NULL:
     if   return_sig[0] == u'L': return_cls = JClass.named(env, return_sig[1:-1])
     elif return_sig[0] == u'[': return_cls = JClass.named(env, return_sig)
     return_sig = return_sig[0]
-        
+
     # Create the Python bridge function
     def pyjvm_bridge(_env, _obj, *args):
         cdef JEnv env = JEnv.wrap(<JNIEnv*>ptr(_env))
@@ -296,8 +325,8 @@ cdef void* create_bridge(JEnv env, method, unicode sig) except NULL:
             # Convert the arguments
             new_args = []
             for sig,arg in zip(param_sigs, args):
-                arg = arg.value
-                if sig[0] == 'L' or sig[0] == '[' and arg is not None:
+                arg = getattr(arg, 'value', arg)
+                if sig[0] == 'L' or sig[0] == '[':
                     arg = object2py(env, <jobject>ptr(arg))
                 elif sig[0] == 'C': arg = unichr(arg)
                 new_args.append(arg)
@@ -316,16 +345,23 @@ cdef void* create_bridge(JEnv env, method, unicode sig) except NULL:
             if return_sig == u'J': return py2long(retval)
             if return_sig == u'F': return py2float(retval)
             if return_sig == u'D': return py2double(retval)
-            return None #if return_sig == u'V':
-        except BaseException as ex:
+            return 0 #if return_sig == u'V':
+        except BaseException as exc:
             # TODO: could the Python stack trace be integrated into the exception?
-            if isinstance(ex, JavaClass) and is_throwable(env, get_object_class(ex).clazz):
-                # Already a Java Throwable, just throw it
-                env.Throw(<jthrowable>get_object(ex))
-            else:
-                pass # TODO
-    
+            if not isinstance(exc, JavaClass) or not is_throwable(env, get_object_class(exc).clazz):
+                # Wrap the Python exception in a Java exception
+                IF PY_VERSION >= PY_VERSION_3:
+                    exc = wrap_exc(exc) # exc has __traceback__ attribute
+                ELSE:
+                    from sys import exc_info
+                    exc = wrap_exc(exc, exc_info()[2]) # need to grab global exception traceback
+            env.Throw(<jthrowable>get_object(exc))
+            return 0
+
     # Create the C function
+    import __debug
+    __debug("creating bridge:", method.__name__, sig)
+    
     cfunctype = ctypes.CFUNCTYPE(java2ctypes[return_sig], ctypes.c_void_p, ctypes.c_void_p,
         *[java2ctypes[sig[0]] for sig in param_sigs])
     method.__pyjvm_cfunc__ = cfunctype(pyjvm_bridge)
@@ -371,10 +407,13 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
         name = u'pyjvm.__synth__.'+to_unicode(cls.__name__)+'_'+random_string()
     
     # Get the __init__ and __dealloc__ methods
-    init = cls.__dict__.get('__init__', lambda self,*args:None)
+    def __init__(self, *args): pass
+    if '__init__' in cls.__dict__: __init__ = cls.__dict__['__init__']
     prev_dealloc = cls.__dict__.get('__dealloc__', None)
-    dealloc = ((lambda self: unregister_natives(clazz)) if prev_dealloc is None else 
-               (lambda self: (prev_dealloc(self), unregister_natives(clazz)))) # extend the old dealloc
+    if prev_dealloc is None:
+        def __dealloc__(self): unregister_natives(clazz)
+    else: # extend the old dealloc
+        def __dealloc__(self): prev_dealloc(self); unregister_natives(clazz)
 
     # Setup variables
     cdef ConstantPool constants = ConstantPool()
@@ -387,7 +426,7 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
     for ctor in superclass.constructors:
         if not ctor.is_private():
             ctors += 1
-            meth_infos.extend(MethodInfo.ctor_w_init(constants, ctor, name, init))
+            meth_infos.extend(MethodInfo.ctor_w_init(constants, ctor, name, __init__))
 
     # Create the methods
     cdef dict abstract = {}, concrete = {}
@@ -413,7 +452,7 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
     data = BytesIO()
 
     # Access Flags / Modifiers
-    data.write(u2(SUPER|SYNTHETIC|(0 if len(abstract) == 0 else ABSTRACT)))
+    data.write(u2(PUBLIC|SUPER|SYNTHETIC|(0 if len(abstract) == 0 else ABSTRACT)))
 
     # this and super classes and interfaces
     data.write(u2(constants.cls_name(name)) + u2(constants.cls(superclass)) + u2(len(interfaces)))
@@ -450,8 +489,8 @@ def synth_class(cls, methods, JClass superclass, list interfaces):
     # Make the JavaClass
     attr = cls.__dict__.copy()
     attr['__java_class_name__'] = name
-    attr['__init__'] = init
-    attr['__dealloc__'] = dealloc
+    attr['__init__'] = __init__
+    attr['__dealloc__'] = __dealloc__
     slots = attr.get('__slots__')
     if slots is not None:
         if isinstance(slots, str): slots = [slots]
@@ -574,3 +613,115 @@ def extends(jc, *jcs):
         # Create the synthetic class
         return synth_class(cls, methods, superclass, interfaces)
     return jvm_extends
+implements = extends
+
+
+########## Create Python -> Java exception mapping and base synthetic classes ##########
+cdef int init_synth(JEnv env) except -1:
+    global exc_map; exc_map = []
+
+    # These exception types are tried in this order to find a logical Python -> Java mapping
+    import re, locale, queue, ctypes
+    def add(exc, cn):
+        if class_exists(env, cn): exc_map.append((exc, cn))
+
+    # Errors (all derive from Error or VirtualMachineError)
+    add(AssertionError,       u'java.lang.AssertionError')
+    add(MemoryError,          u'java.lang.OutOfMemoryError') # VirtualMachineError
+    IF PY_VERSION >= PY_VERSION_3_5:
+        add(RecursionError,   u'java.lang.StackOverflowError') # VirtualMachineError
+    add(SystemError,          u'java.lang.VirtualMachineError')
+    add(KeyboardInterrupt,    u'java.lang.ThreadDeath')
+    add(SystemExit,           u'java.lang.ThreadDeath')
+
+    # Unchecked Exceptions (all except the last one derive directly from RuntimeException)
+    add(ArithmeticError,        u'java.lang.ArithmeticException')
+    add(NotImplementedError,    u'java.lang.UnsupportedOperationException')
+    add(IndexError,             u'java.lang.IndexOutOfBoundsException')
+    add(ValueError,             u'java.lang.IllegalArgumentException')
+    add(ctypes.ArgumentError,   u'java.lang.IllegalArgumentException')
+    add(TypeError,              u'java.lang.ClassCastException')
+    IF PY_VERSION >= PY_VERSION_3_3:
+        add(PermissionError,    u'java.lang.SecurityException')
+    add(LookupError,            u'java.util.NoSuchElementException')
+    add(StopIteration,          u'java.util.NoSuchElementException')
+    add(queue.Empty,            u'java.util.NoSuchElementException')
+    add(queue.Full,             u'java.lang.IllegalStateException')
+    add(locale.Error,           u'java.util.IllformedLocaleException')
+    add(re.error,               u'java.util.regex.PatternSyntaxException') # IllegalArgumentException
+
+    # Checked Exceptions (all derive from IOException, mostly directly)
+    add(UnicodeError,           u'java.io.CharConversionException')
+    add(EOFError,               u'java.io.EOFException')
+    IF PY_VERSION >= PY_VERSION_3_3:
+        add(ConnectionError,    u'java.net.SocketException')
+        add(FileExistsError,    u'java.nio.file.FileAlreadyExistsException') # FileSystemException
+        add(NotADirectoryError, u'java.nio.file.NotDirectoryException') # FileSystemException
+        add(FileNotFoundError,  u'java.io.FileNotFoundException')
+        add(IsADirectoryError,  u'java.io.FileNotFoundException')
+        add(InterruptedError,   u'java.io.InterruptedIOException')
+        add(TimeoutError,       u'java.io.InterruptedIOException')
+        add(OSError,            u'java.io.IOException')
+    ELSE:
+        import socket
+        add(socket.timeout,     u'java.net.SocketTimeoutException') # InterruptedIOException
+        add(socket.error,       u'java.net.SocketException')
+        add(OSError,            u'java.io.IOException')
+        add(IOError,            u'java.io.IOException')
+        add(EnvironmentError,   u'java.io.IOException')
+
+    # Other candidates:
+    #IF PY_VERSION >= PY_VERSION_3:
+    #    import threading
+    #    add(threading.BrokenBarrierError, u'java.util.concurrent.BrokenBarrierException') # Exception
+    #IF PY_VERSION >= PY_VERSION_3_2:
+    #    import concurrent.futures
+    #    add(concurrent.futures.CanceledError, u'java.util.concurrent.CancellationException') # IllegalStateException->RuntimeException
+    #    add(concurrent.futures.TimeoutError, u'java.util.concurrent.TimeoutException')       # Exception
+    #IF PY_VERSION >= PY_VERSION_3_4:
+    #    import asyncio
+    #    add(asyncio.QueueEmpty,        u'java.lang.NoSuchElementException') # RuntimeException
+    #    add(asyncio.QueueFull,         u'java.lang.IllegalStateException')  # RuntimeException
+    #    add(asyncio.InvalidStateError, u'java.lang.IllegalStateException')  # RuntimeException
+    
+    # Java exception that wraps a Python exception
+    @extends(get_java_class(u'java.lang.RuntimeException'))
+    class PythonException:
+        exc = None
+        @classmethod
+        def create(cls, exc, tb=None):
+            assert isinstance(exc, BaseException)
+            e = cls(get_py_exc_msg(exc))
+            e.exc = exc
+
+            # Load the Python stack trace into the Java exception
+            if tb is None: tb = getattr(exc, '__traceback__', None) # Python 2.7 doesn't have __traceback__ attribute
+            if tb is not None:
+                from .arrays import object_array
+                StackTraceElement = get_java_class(u'java.lang.StackTraceElement')
+                st = []
+                # Go through each part of the traceback
+                while tb is not None:
+                    frm = tb.tb_frame
+                    frm_self = frm.f_locals.get('self')
+                    if frm_self is not None:
+                        frm_cls = frm_self.__class__
+                        dec_cls = (('' if frm_cls.__module__ is None else (frm_cls.__module__ + '.')) +
+                                   getattr(frm_cls, '__qualname__', frm_cls.__name__))
+                    else:
+                        dec_cls = frm.f_globals.get('__name__', '<unnamed>')
+                    st.append(StackTraceElement(dec_cls, frm.f_code.co_name, frm.f_code.co_filename, tb.tb_lineno))
+                    tb = tb.tb_next
+                e._jcall1obj(u'setStackTrace', object_array(st[::-1], type=StackTraceElement))
+            return e
+    global PyException
+    PyException = PythonException
+        
+cdef int dealloc_synth(JEnv env) except -1:
+    global exc_map, PyException
+    exc_map = None
+    PyException = None
+    return 0
+
+jvm_add_init_hook(init_synth, 4)
+jvm_add_dealloc_hook(dealloc_synth, 4)
