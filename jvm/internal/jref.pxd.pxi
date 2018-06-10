@@ -123,7 +123,7 @@ cdef struct JRunnableDef:
 cdef struct JThreadDef:
     jclass clazz
     jmethodID currentThread # static
-    jmethodID getContextClassLoader, setContextClassLoader
+    jmethodID getContextClassLoader, setContextClassLoader, start, interrupt, join
 cdef struct JThrowableDef:
     jclass clazz
     jmethodID getLocalizedMessage, getStackTrace, getCause

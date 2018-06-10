@@ -1016,7 +1016,7 @@ cdef class JPrimitiveArray(JArray):
         self.p.set(jenv(), self.arr, check_index(index, self.length), 1, &x)
 
     def __repr__(self):
-        return u"<Java array %s[%d] at 0x%08x>" % (get_object_class(self).component_type.name, self.length, java_id(get_object(self)))
+        return u"<Java array %s[%d] at 0x%08x>" % (get_object_class(self).component_type.name, self.length, java_id(jenv(), get_object(self)))
 
     ##### Methods that are forwarded to primitive-type specific functions #####
     def __iter__(self):     return JPrimArrayIter(self, False)
@@ -1340,7 +1340,7 @@ cdef class JObjectArray(JArray):
         cdef JClass clazz = get_object_class(self)
         cdef jsize nd = -1
         while clazz.is_array(): nd += 1; clazz = clazz.component_type
-        return u"<Java array %s[%d]%s at 0x%08x>" % (clazz.name, self.length, u'[]'*nd, java_id(get_object(self)))
+        return u"<Java array %s[%d]%s at 0x%08x>" % (clazz.name, self.length, u'[]'*nd, java_id(jenv(), get_object(self)))
     def __iter__(self):
         cdef JEnv env = jenv()
         cdef jobjectArray arr = <jobjectArray>self.arr

@@ -419,6 +419,9 @@ cdef void init_ThreadDef(JNIEnv* env) nogil:
     ThreadDef.currentThread = GetStaticMethodID(env, C, b'currentThread', b'()Ljava/lang/Thread;')
     ThreadDef.getContextClassLoader = GetMethodID(env, C, b'getContextClassLoader', b'()Ljava/lang/ClassLoader;')
     ThreadDef.setContextClassLoader = GetMethodID(env, C, b'setContextClassLoader', b'(Ljava/lang/ClassLoader;)V')
+    ThreadDef.start                 = GetMethodID(env, C, 'start', '()V')
+    ThreadDef.interrupt             = GetMethodID(env, C, 'interrupt', '()V')
+    ThreadDef.join                  = GetMethodID(env, C, 'join', '()V')
     DeleteLocalRef(env, C)
 cdef void dealloc_ThreadDef(JNIEnv* env) nogil:
     if ThreadDef.clazz is not NULL: DeleteGlobalRef(env, ThreadDef.clazz)
@@ -426,6 +429,9 @@ cdef void dealloc_ThreadDef(JNIEnv* env) nogil:
     ThreadDef.currentThread         = NULL
     ThreadDef.getContextClassLoader = NULL
     ThreadDef.setContextClassLoader = NULL
+    ThreadDef.start                 = NULL
+    ThreadDef.interrupt             = NULL
+    ThreadDef.join                  = NULL
 
 cdef void init_ThrowableDef(JNIEnv* env) nogil:
     cdef jclass C = FindClass(env, b'java/lang/Throwable')

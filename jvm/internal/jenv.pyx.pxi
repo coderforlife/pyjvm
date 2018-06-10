@@ -69,10 +69,9 @@ cdef class JEnv(object):
             if loader is not NULL: self.DeleteLocalRef(loader)
             else:
                 val.l = self.CallStaticObject(ClassLoaderDef.clazz, ClassLoaderDef.getSystemClassLoader)
-                self.env[0].CallVoidMethodA(self.env, cur_thrd, ThreadDef.setContextClassLoader, &val)
-                self.env[0].DeleteLocalRef(self.env, val.l)
-                self.check_exc()
-        finally: self.env[0].DeleteLocalRef(self.env, cur_thrd)
+                try: self.CallVoid(cur_thrd, ThreadDef.setContextClassLoader, &val)
+                finally: self.DeleteLocalRef(val.l)
+        finally: self.DeleteLocalRef(cur_thrd)
         return 0
 
     # Basic Conversion

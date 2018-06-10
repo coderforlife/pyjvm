@@ -350,7 +350,7 @@ class JavaClass(type):
             if clazz.is_static(): return u"<Java nested %s '%s'>"%x
             if not hasattr(self, '__self__'): return u"<Java inner %s '%s'>"%x
             return u"<Java inner %s '%s' bound to instance of '%s' at 0x%08x>"%(x+
-                    (get_object_class(self.__self__).name, java_id(get_object(self.__self__))))
+                    (get_object_class(self.__self__).name, java_id(jenv(), get_object(self.__self__))))
         return u"<Java %s '%s'>"%x
     def _bind_inner_class_to(self, obj):
         cdef JClass clazz = self.__jclass__
@@ -416,7 +416,7 @@ cdef class JavaMethods(object):
         def __get__(self): return tuple((<JMethod>m).sig() for m in self.methods)
     def __repr__(self):
         cdef unicode cname = get_object_class(self.__self__).name, name = self.__name__
-        return u"<Java methods %s.%s of instance at 0x%08x>" % (cname, name, java_id(get_object(self.__self__)))
+        return u"<Java methods %s.%s of instance at 0x%08x>" % (cname, name, java_id(jenv(), get_object(self.__self__)))
 cdef class JavaStaticMethods(JavaMethods):
     """
     Like JavaMethods but for a group of static methods. `__self__` is a JavaClass instead of an
@@ -460,7 +460,7 @@ cdef class JavaMethod(object):
     def __repr__(self):
         cdef JClass clazz = get_object_class(self.__self__)
         cdef unicode cname = clazz.name, name = self.method.name, psig = self.method.param_sig()
-        return u"<Java method %s.%s(%s) of instance at 0x%08x>" % (cname, name, psig, java_id(get_object(self.__self__)))
+        return u"<Java method %s.%s(%s) of instance at 0x%08x>" % (cname, name, psig, java_id(jenv(), get_object(self.__self__)))
 cdef class JavaStaticMethod(JavaMethod):
     """A single Java static method."""
     # __self__ is a JavaClass
@@ -755,7 +755,7 @@ cdef int init_objects(JEnv env) except -1:
         ELSE:
             def __str__(self): return jenv().CallObjectMethod(get_object(self), ObjectDef.toString, NULL, True)
         def __repr__(self):
-            return u"<Java instance of '%s' at 0x%08x>" % (get_object_class(self).name, java_id(get_object(self)))
+            return u"<Java instance of '%s' at 0x%08x>" % (get_object_class(self).name, java_id(jenv(), get_object(self)))
 
     @template(u'java.lang.AutoCloseable')
     class AutoCloseable(object):

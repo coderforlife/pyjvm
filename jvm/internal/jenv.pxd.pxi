@@ -433,6 +433,11 @@ cdef class JEnv(object):
     ########## Call<type>Method Wrappers with some conversion ##########
     # These are designed for reading the reflection data. They do not release the GIL and only
     # perform very basic conversions.
+    cdef inline int CallVoid(self, jobject obj, jmethodID method, const jvalue *args) except -1:
+        assert obj is not NULL and method is not NULL
+        self.env[0].CallVoidMethodA(self.env, obj, method, args)
+        self.check_exc()
+        return 0
     cdef inline bint CallBoolean(self, jobject obj, jmethodID method, jvalue* args = NULL) except -1:
         assert obj is not NULL and method is not NULL
         cdef jboolean out = self.env[0].CallBooleanMethodA(self.env, obj, method, args)
